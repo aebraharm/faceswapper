@@ -1,0 +1,79 @@
+name: Windows desktop installer
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - 'arena/**'
+    paths:
+      - '.github/workflows/windows-desktop.yml'
+      - 'backend/**'
+      - 'frontend/**'
+      - 'scripts/build-windows.ps1'
+      - 'scripts/smoke-test-sidecar.py'
+
+permissions:
+  contents: read
+
+jobs:
+  build-install-test:
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.12'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Run backend and frontend tests and build the Windows installer
+        shell: pwsh
+        working-directory: frontend
+        run: |
+          python -m venv ../.venv
+          ../.venv/Scripts/python.exe -m pip install -r ../backend/requirements-dev.txt
+          ../.venv/Scripts/python.exe -m pytest ../backend/tests
+          npm ci
+          npm test
+          npm run typecheck
+          npm run dist:win
+
+      - name: Install and uninstall as the current user
+        shell: pwsh
+        working-directory: frontend
+        run: |
+          $installer = Get-ChildItem 'release\FRAME-*-Setup-*.exe' | Select-Object -First 1
+          if (-not $installer) { throw 'NSIS installer artifact was not produced.' }
+          $installPath = Join-Path $env:RUNNER_TEMP 'FRAME-smoke-install'
+          $installResult = Start-Process -FilePath $installer.FullName -ArgumentList @('/S', "/D=$installPath") -Wait -PassThru
+          if ($installResult.ExitCode -ne 0) { throw "Silent per-user install failed with $($installResult.ExitCode)." }
+
+          $mainExecutable = Join-Path $installPath 'FRAME.exe'
+          $packagedResources = Join-Path $installPath 'resources'
+          $sidecarExecutable = Join-Path $packagedResources 'backend\FrameBackend.exe'
+          if (-not (Test-Path $mainExecutable)) { throw "Installed Electron executable is missing: $mainExecutable" }
+          if (-not (Test-Path (Join-Path $packagedResources 'app.asar'))) { throw 'Packaged React/Electron production resources are missing.' }
+          if (-not (Test-Path $sidecarExecutable)) { throw "Installed Python sidecar is missing: $sidecarExecutable" }
+
+          $uninstaller = Get-ChildItem $installPath -Filter '*unins*.exe' | Select-Object -First 1
+          if (-not $uninstaller) { throw 'NSIS uninstaller was not created.' }
+          $uninstallResult = Start-Process -FilePath $uninstaller.FullName -ArgumentList '/S' -Wait -PassThru
+          if ($uninstallResult.ExitCode -ne 0) { throw "Silent uninstall failed with $($uninstallResult.ExitCode)." }
+          if (Test-Path $mainExecutable) { throw 'Uninstall left the application executable behind.' }
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: FRAME-Windows-NSIS-x64
+          path: frontend/release/FRAME-*-Setup-*.exe
+          if-no-files-found: error
+          retention-days: 14

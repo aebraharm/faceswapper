@@ -1,32 +1,48 @@
 import { app, BrowserWindow, dialog, ipcMain, session } from 'electron';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { mkdir } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-
-interface RuntimeConfig {
-  backendUrl: string;
-  websocketUrl: string;
-  sessionToken: string;
-}
+import {
+  BACKEND_READY_TIMEOUT_MS,
+  BACKEND_SHUTDOWN_TIMEOUT_MS,
+  createAuthenticatedShutdownRequest,
+  createRuntimeConfig,
+  waitForAuthenticatedBackend,
+  type DesktopRuntimeConfig,
+} from './backend-lifecycle';
+import { CameraPermissionGate } from './camera-permission';
+import {
+  createBackendCommand,
+  resolvePackagedRendererPath,
+  resolveRendererEntry,
+  resolveUserDataPath,
+} from './desktop-paths';
+import { loadDesktopPreferences, saveDesktopPreferences } from './user-settings';
 
 let mainWindow: BrowserWindow | null = null;
 let backendProcess: ChildProcess | null = null;
-let runtimeConfig: RuntimeConfig | null = null;
+let runtimeConfig: DesktopRuntimeConfig | null = null;
 let backendStopping = false;
 let isQuitting = false;
-let nextCameraPermissionAllowed = false;
 let backendLogTail = '';
 let backendSpawnError: Error | null = null;
 
 // tsc emits this file under frontend/dist-electron/electron in development.
-const repoRoot = path.resolve(__dirname, '..', '..', '..');
 const isPackaged = app.isPackaged;
-const BACKEND_READY_TIMEOUT_MS = 20_000;
-const BACKEND_SHUTDOWN_TIMEOUT_MS = 4_000;
 const DEV_RENDERER_ORIGIN = 'http://127.0.0.1:5173';
-const PACKAGED_RENDERER_URL = pathToFileURL(path.join(app.getAppPath(), 'dist', 'index.html')).href;
+app.setName('FRAME');
+const appDataRoot = process.platform === 'win32'
+  ? process.env.LOCALAPPDATA || app.getPath('appData')
+  : app.getPath('appData');
+const userDataDirectory = resolveUserDataPath(appDataRoot, isPackaged, process.platform);
+app.setPath('userData', userDataDirectory);
+app.setPath('sessionData', userDataDirectory);
+const packagedRendererPath = resolvePackagedRendererPath(app.getAppPath(), process.platform);
+const PACKAGED_RENDERER_URL = pathToFileURL(packagedRendererPath).href;
+const cameraPermissionGate = new CameraPermissionGate();
 
 function isTrustedRendererUrl(url: string): boolean {
   if (isPackaged) return url === PACKAGED_RENDERER_URL || url.startsWith(`${PACKAGED_RENDERER_URL}#`);
@@ -74,32 +90,19 @@ function delay(ms: number): Promise<void> {
 }
 
 function spawnBackend(port: number, sessionToken: string): ChildProcess {
-  const backendDirectory = path.join(repoRoot, 'backend');
-  const environment = {
-    ...process.env,
-    FRAME_DESKTOP_SESSION_TOKEN: sessionToken,
-    FRAME_DESKTOP_SHUTDOWN_TOKEN: sessionToken,
-  };
-
-  if (isPackaged) {
-    const executable = path.join(process.resourcesPath, 'backend', 'FrameBackend.exe');
-    const child = spawn(executable, ['--port', String(port)], {
-      cwd: path.dirname(executable),
-      env: environment,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true,
-    });
-    child.stdout?.on('data', appendBackendLog);
-    child.stderr?.on('data', appendBackendLog);
-    child.on('error', (error) => { backendSpawnError = error; });
-    return child;
-  }
-
-  const python = process.env.FRAME_PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
-  const launcher = path.join(backendDirectory, 'launcher.py');
-  const child = spawn(python, [launcher, '--port', String(port)], {
-    cwd: backendDirectory,
-    env: environment,
+  const command = createBackendCommand({
+    isPackaged,
+    resourcesPath: process.resourcesPath,
+    compiledMainDirectory: __dirname,
+    platform: process.platform,
+    port,
+    sessionToken,
+    baseEnvironment: process.env,
+    pythonExecutable: process.env.FRAME_PYTHON,
+  });
+  const child = spawn(command.command, command.args, {
+    cwd: command.cwd,
+    env: command.env,
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });
@@ -107,31 +110,6 @@ function spawnBackend(port: number, sessionToken: string): ChildProcess {
   child.stderr?.on('data', appendBackendLog);
   child.on('error', (error) => { backendSpawnError = error; });
   return child;
-}
-
-async function waitForBackend(port: number, token: string, child: ChildProcess): Promise<void> {
-  const startedAt = Date.now();
-  const healthUrl = `http://127.0.0.1:${port}/health`;
-  while (Date.now() - startedAt < BACKEND_READY_TIMEOUT_MS) {
-    if (backendSpawnError) throw backendSpawnError;
-    if (child.exitCode !== null) {
-      throw new Error(`The Python backend exited during startup (exit code ${child.exitCode}).`);
-    }
-    try {
-      const response = await fetch(healthUrl, {
-        headers: { 'X-Frame-Session': token },
-        signal: AbortSignal.timeout(1_200),
-      });
-      if (response.ok) {
-        const health = await response.json() as { status?: string };
-        if (health.status === 'ok') return;
-      }
-    } catch {
-      // The backend may still be importing OpenCV/ONNX Runtime; retry until timeout.
-    }
-    await delay(180);
-  }
-  throw new Error(`The Python backend did not become healthy within ${BACKEND_READY_TIMEOUT_MS / 1_000} seconds.`);
 }
 
 async function stopChild(child: ChildProcess): Promise<void> {
@@ -148,7 +126,7 @@ async function stopChild(child: ChildProcess): Promise<void> {
   });
 }
 
-async function launchBackend(): Promise<RuntimeConfig> {
+async function launchBackend(): Promise<DesktopRuntimeConfig> {
   const errors: string[] = [];
   backendLogTail = '';
   backendSpawnError = null;
@@ -159,7 +137,13 @@ async function launchBackend(): Promise<RuntimeConfig> {
     const child = spawnBackend(port, token);
     backendProcess = child;
     try {
-      await waitForBackend(port, token, child);
+      await waitForAuthenticatedBackend({
+        port,
+        sessionToken: token,
+        getExitCode: () => child.exitCode,
+        getSpawnError: () => backendSpawnError,
+        timeoutMs: BACKEND_READY_TIMEOUT_MS,
+      });
       child.on('exit', (code, signal) => {
         if (backendStopping || isQuitting || !mainWindow || mainWindow.isDestroyed()) return;
         const message = `Local AI backend stopped unexpectedly (code ${code ?? 'unknown'}, signal ${signal ?? 'none'}).`;
@@ -169,11 +153,7 @@ async function launchBackend(): Promise<RuntimeConfig> {
         if (backendStopping || isQuitting || !mainWindow || mainWindow.isDestroyed()) return;
         mainWindow.webContents.send('desktop:backend-error', `Could not run the local AI backend: ${error.message}`);
       });
-      return {
-        backendUrl: `http://127.0.0.1:${port}`,
-        websocketUrl: `ws://127.0.0.1:${port}`,
-        sessionToken: token,
-      };
+      return createRuntimeConfig(port, token);
     } catch (error) {
       errors.push(error instanceof Error ? error.message : String(error));
       await stopChild(child);
@@ -200,14 +180,10 @@ async function stopBackend(): Promise<void> {
 
   if (runtimeConfig) {
     try {
-      await fetch(`${runtimeConfig.backendUrl}/internal/shutdown`, {
-        method: 'POST',
-        headers: {
-          'X-Frame-Session': runtimeConfig.sessionToken,
-          'X-Frame-Shutdown-Token': runtimeConfig.sessionToken,
-        },
-        signal: AbortSignal.timeout(1_500),
-      });
+      await fetch(
+        `${runtimeConfig.backendUrl}/internal/shutdown`,
+        createAuthenticatedShutdownRequest(runtimeConfig.sessionToken),
+      );
     } catch {
       // If the service is already gone, the child-process fallback below still runs.
     }
@@ -227,15 +203,12 @@ function configureCameraPermissions(): void {
       && !mainWindow.isDestroyed()
       && webContents.id === mainWindow.webContents.id
       && isTrustedRendererUrl(webContents.getURL());
-    const allow = permission === 'media' && trustedWindow && nextCameraPermissionAllowed;
-    nextCameraPermissionAllowed = false;
-    callback(Boolean(allow));
+    callback(cameraPermissionGate.consume(permission, Boolean(trustedWindow)));
   });
 
   ipcMain.handle('desktop:authorize-camera', (event) => {
     if (!isTrustedIpcSender(event) || !mainWindow?.isVisible()) return false;
-    nextCameraPermissionAllowed = true;
-    setTimeout(() => { nextCameraPermissionAllowed = false; }, 5_000);
+    cameraPermissionGate.authorize();
     return true;
   });
 }
@@ -267,10 +240,16 @@ async function createMainWindow(): Promise<void> {
   });
   mainWindow.on('closed', () => { mainWindow = null; });
 
-  if (isPackaged) {
-    await mainWindow.loadFile(path.join(app.getAppPath(), 'dist', 'index.html'));
+  const renderer = resolveRendererEntry(
+    isPackaged,
+    app.getAppPath(),
+    `${DEV_RENDERER_ORIGIN}/`,
+    process.platform,
+  );
+  if (renderer.kind === 'file') {
+    await mainWindow.loadFile(renderer.path);
   } else {
-    await mainWindow.loadURL(`${DEV_RENDERER_ORIGIN}/`);
+    await mainWindow.loadURL(renderer.url);
   }
 }
 
@@ -280,9 +259,20 @@ ipcMain.handle('desktop:get-runtime-config', (event) => {
   return runtimeConfig;
 });
 
+ipcMain.handle('desktop:load-settings', (event) => {
+  if (!isTrustedIpcSender(event)) throw new Error('Untrusted renderer requested desktop settings.');
+  return loadDesktopPreferences(app.getPath('userData'));
+});
+
+ipcMain.handle('desktop:save-settings', (event, preferences: unknown) => {
+  if (!isTrustedIpcSender(event)) throw new Error('Untrusted renderer requested desktop settings.');
+  return saveDesktopPreferences(app.getPath('userData'), preferences);
+});
+
 app.whenReady().then(async () => {
   configureCameraPermissions();
   try {
+    await mkdir(app.getPath('userData'), { recursive: true });
     runtimeConfig = await launchBackend();
     await createMainWindow();
   } catch (error) {

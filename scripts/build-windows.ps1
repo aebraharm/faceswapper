@@ -49,6 +49,10 @@ if (-not (Test-Path $sidecar)) {
     throw "PyInstaller output not found: $sidecar"
 }
 
+Write-Host 'Verifying the packaged sidecar launch, authenticated health check and graceful shutdown...'
+& $python @pythonArgs (Join-Path $repoRoot 'scripts\smoke-test-sidecar.py') --executable $sidecar
+if ($LASTEXITCODE -ne 0) { throw 'The packaged Python sidecar smoke test failed.' }
+
 Write-Host 'Building React frontend and Electron main/preload processes...'
 Push-Location $frontendRoot
 try {

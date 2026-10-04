@@ -26,6 +26,7 @@ import {
 import { MetricCard } from './components/MetricCard';
 import { api } from './services/api';
 import { getProcessedVideoStream } from './services/output';
+import type { DesktopPreferences } from './types/desktop';
 import type { CameraStatus, FaceBox, FrameStats, SourceFaceStatus, TransformerStatus } from './types/api';
 
 const emptySource: SourceFaceStatus = {
@@ -83,11 +84,12 @@ function App() {
   const [isDragging, setIsDragging] = useState(false);
   const [uploadBusy, setUploadBusy] = useState(false);
   const [notice, setNotice] = useState('');
+  const [preferencesLoaded, setPreferencesLoaded] = useState(false);
   const [transformEnabled, setTransformEnabled] = useState(false);
-  const [provider, setProvider] = useState('auto');
+  const [provider, setProvider] = useState<DesktopPreferences['provider']>('auto');
   const [transformationRunning, setTransformationRunning] = useState(false);
   const [intensity, setIntensity] = useState(0.85);
-  const [resolution, setResolution] = useState(640);
+  const [resolution, setResolution] = useState<DesktopPreferences['resolution']>(640);
   const [fps, setFps] = useState(0);
   const [latency, setLatency] = useState(0);
   const [cameraResolution, setCameraResolution] = useState('—');
@@ -105,6 +107,21 @@ function App() {
 
   useEffect(() => {
     let mounted = true;
+    if (window.frameDesktop) {
+      void window.frameDesktop.loadSettings()
+        .then((preferences) => {
+          if (!mounted) return;
+          setProvider(preferences.provider);
+          setIntensity(preferences.intensity);
+          setResolution(preferences.resolution);
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          if (mounted) setPreferencesLoaded(true);
+        });
+    } else {
+      setPreferencesLoaded(true);
+    }
     const removeBackendErrorListener = window.frameDesktop?.onBackendError((message) => {
       setCameraError(`Local AI backend stopped: ${message}`);
       setBackendReady(false);
@@ -153,6 +170,14 @@ function App() {
       if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
     };
   }, [refreshDevices]);
+
+  useEffect(() => {
+    if (!preferencesLoaded || !window.frameDesktop) return;
+    const timer = window.setTimeout(() => {
+      void window.frameDesktop?.saveSettings({ provider, intensity, resolution }).catch(() => undefined);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [preferencesLoaded, provider, intensity, resolution]);
 
   useEffect(() => {
     if (!cameraLive) return;
@@ -694,7 +719,7 @@ function App() {
             </div>
             <div className="resolution-control">
               <label htmlFor="resolution-select">Processing resolution</label>
-              <div className="resolution-select-wrap"><select id="resolution-select" value={resolution} onChange={(event) => setResolution(Number(event.target.value))}>
+              <div className="resolution-select-wrap"><select id="resolution-select" value={resolution} onChange={(event) => setResolution(Number(event.target.value) as DesktopPreferences['resolution'])}>
                 <option value={320}>320 px · fastest</option><option value={480}>480 px · balanced</option><option value={640}>640 px · high quality</option><option value={720}>720 px · max detail</option>
               </select><ChevronDown size={14} /></div>
             </div>
@@ -707,7 +732,7 @@ function App() {
               <div className="model-copy"><h2>{model.loaded ? 'Identity model loaded' : 'Bring a licensed model'}</h2><p>{model.loaded ? model.name : 'The processing pipeline is ready for a compatible ONNX model bundle.'}</p></div>
             </div>
             <div className="model-detail-row"><span><span className="detail-key">DEVICE</span><strong>{model.device}</strong></span><span><span className="detail-key">LANDMARKS</span><strong>{landmarksAvailable ? 'MediaPipe' : 'OpenCV fallback'}</strong></span></div>
-            <div className="provider-row"><label htmlFor="provider-select">INFERENCE PROVIDER</label><div className="provider-select-wrap"><select id="provider-select" value={provider} onChange={(event) => setProvider(event.target.value)} disabled={model.loaded}><option value="auto">Auto · recommended</option><option value="CPUExecutionProvider">CPU</option><option value="CUDAExecutionProvider">CUDA GPU</option></select><ChevronDown size={12} /></div></div>
+            <div className="provider-row"><label htmlFor="provider-select">INFERENCE PROVIDER</label><div className="provider-select-wrap"><select id="provider-select" value={provider} onChange={(event) => setProvider(event.target.value as DesktopPreferences['provider'])} disabled={model.loaded}><option value="auto">Auto · recommended</option><option value="CPUExecutionProvider">CPU</option><option value="CUDAExecutionProvider">CUDA GPU</option></select><ChevronDown size={12} /></div></div>
             <button className={`button ${model.loaded ? 'button--outline' : 'button--dark'} model-action`} onClick={() => void (model.loaded ? unloadModel() : loadModel())} disabled={!backendReady}>
               {model.loaded ? <><ArrowDownToLine size={15} className="rotate-180" /> Unload model</> : <><Zap size={15} /> Load configured model</>}
             </button>

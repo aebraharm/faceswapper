@@ -68,6 +68,12 @@ If the backend cannot start, Electron shows a native startup error dialog with t
 - The preload exposes only `getRuntimeConfig`, `authorizeCamera`, and a backend-error subscription. Renderer Node integration is off and context isolation is on.
 - When quitting, Electron calls the authenticated `/internal/shutdown` hook so Uvicorn can exit cleanly; it terminates the child if graceful shutdown times out.
 
+## Per-user installation and application data
+
+The NSIS installer is one-click and per-user (`perMachine: false`), with elevation and custom install paths disabled. It installs under the current Windows user's local Programs directory; no administrator privileges are required. NSIS creates an uninstaller and shortcuts. Uninstall removes the app but intentionally retains user settings so reinstalling does not lose preferences.
+
+Electron stores only the inference-provider choice, transform intensity, and processing resolution in `%LOCALAPPDATA%\FRAME\settings.json` for packaged Windows installs. Development uses `%LOCALAPPDATA%\FRAME Development\settings.json`. These folders are created with the current user's permissions. Source photos, face features, camera frames, session tokens, and model weights are not written there. To remove preferences as well, delete the `FRAME` folder under `%LOCALAPPDATA%` after uninstalling.
+
 ## Build the Windows NSIS installer
 
 Build on Windows (or a Windows CI runner); PyInstaller does not cross-compile a Windows Python executable from the Linux development container.
@@ -86,9 +92,10 @@ The PowerShell build script:
 
 1. Runs PyInstaller in `--onedir` mode for the FastAPI service and collects OpenCV/ONNX Runtime binaries.
 2. Builds the Vite renderer and compiles the Electron main/preload processes.
-3. Runs electron-builder with the **NSIS x64** target.
+3. Launches the newly built sidecar and verifies authenticated health, rejects missing/wrong session tokens, and exercises authenticated graceful shutdown.
+4. Runs electron-builder with the **NSIS x64** target.
 
-The installer is written to `frontend/release/`. Build outputs are ignored by Git. Electron’s Chromium and the renderer assets are packaged by electron-builder; the Python sidecar is copied as an extra resource.
+The installer is written to `frontend/release/`. Build outputs are ignored by Git. Electron’s Chromium and the renderer assets are packaged by electron-builder; the Python sidecar is copied as an extra resource. The Windows CI workflow at `.github/workflows/windows-desktop.yml` also silently installs the generated installer as the current user, checks the production app and sidecar files, runs the uninstaller, and uploads the installer artifact.
 
 ## Packaged backend location
 
@@ -107,6 +114,18 @@ The main process resolves the executable from `process.resourcesPath`, not the c
 - **Runtime banner:** if the child exits unexpectedly, Electron informs the renderer, which releases the camera and shows the failure.
 - **Camera errors:** remain visible in the existing inline camera panel; Electron authorizes only the camera request initiated by the Start Camera UI action.
 - **Backend:** development logs appear in the Electron process terminal. The packaged sidecar suppresses access logs to avoid logging uploaded image/video requests.
+
+## Windows desktop validation checklist
+
+The automated Windows workflow covers sidecar startup/authentication/shutdown plus a silent per-user installer/uninstaller round trip. On a Windows machine with a camera, also verify the UI/device behavior manually:
+
+1. Install as a standard user and launch FRAME. Confirm the sidecar becomes healthy and the UI loads from the installed production bundle; no Vite server or system Python should be needed.
+2. Leave the camera idle and confirm no camera permission prompt or active camera indicator appears. Click **Start camera** and confirm that is the first camera permission request; deny and retry once, then allow and verify live preview.
+3. Confirm the app sends frames over the local WebSocket, receives processed JPEGs and telemetry, and releases the camera after **Stop camera** and app exit.
+4. Change provider/intensity/resolution, restart the app, and confirm those preferences return while the camera remains stopped. Confirm source photos/identity data are not retained after removing them or exiting.
+5. Uninstall from Windows as a standard user; verify the installed files and shortcuts are removed. The preferences folder is intentionally retained unless manually deleted.
+
+A physical camera is not required for the automated CI job and is not exercised by the sandbox tests.
 
 ## Model and GPU notes
 

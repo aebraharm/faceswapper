@@ -37,6 +37,8 @@ describe('runtime API routing', () => {
     };
     const bridge: FrameDesktopBridge = {
       getRuntimeConfig: vi.fn().mockResolvedValue(config),
+      loadSettings: vi.fn().mockResolvedValue({ provider: 'auto', intensity: 0.85, resolution: 640 }),
+      saveSettings: vi.fn().mockResolvedValue({ provider: 'auto', intensity: 0.85, resolution: 640 }),
       authorizeCamera: vi.fn().mockResolvedValue(true),
       onBackendError: vi.fn().mockReturnValue(() => undefined),
     };

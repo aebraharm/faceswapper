@@ -69,9 +69,11 @@
       "artifactName": "FRAME-${version}-Setup-${arch}.${ext}"
     },
     "nsis": {
-      "oneClick": false,
+      "oneClick": true,
       "perMachine": false,
-      "allowToChangeInstallationDirectory": true,
+      "allowElevation": false,
+      "allowToChangeInstallationDirectory": false,
+      "deleteAppDataOnUninstall": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true
     }
