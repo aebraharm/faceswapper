@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from app.config import Settings
 from app.main import create_app
@@ -123,3 +125,81 @@ def test_camera_websocket_returns_binary_preview_and_performance_stats():
             assert stats["transformation_active"] is False
             assert processed[:2] == b"\xff\xd8"
         client.post("/camera/stop")
+
+
+def test_desktop_session_token_protects_http_routes(monkeypatch):
+    with make_client() as client:
+        monkeypatch.setenv("FRAME_DESKTOP_SESSION_TOKEN", "session-secret")
+        assert client.get("/health").status_code == 404
+        assert client.get("/health", headers={"X-Frame-Session": "session-secret"}).status_code == 200
+
+
+def test_packaged_renderer_can_preflight_authenticated_requests(monkeypatch):
+    with make_client() as client:
+        monkeypatch.setenv("FRAME_DESKTOP_SESSION_TOKEN", "session-secret")
+        response = client.options(
+            "/health",
+            headers={
+                "Origin": "null",
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "x-frame-session",
+            },
+        )
+        assert response.status_code == 200
+        assert response.headers["access-control-allow-origin"] == "null"
+
+
+def test_desktop_websocket_requires_session_subprotocol(monkeypatch):
+    with make_client() as client:
+        monkeypatch.setenv("FRAME_DESKTOP_SESSION_TOKEN", "session-secret")
+        client.post("/camera/start", json={}, headers={"X-Frame-Session": "session-secret"})
+        with pytest.raises(WebSocketDisconnect) as untrusted_origin:
+            with client.websocket_connect(
+                "/ws/stream",
+                headers={"origin": "https://untrusted.example"},
+                subprotocols=["frame-v1", "session-secret"],
+            ):
+                pass
+        assert untrusted_origin.value.code == 1008
+
+        with pytest.raises(WebSocketDisconnect) as disconnected:
+            with client.websocket_connect(
+                "/ws/stream",
+                headers={"origin": "file://"},
+                subprotocols=["frame-v1"],
+            ):
+                pass
+        assert disconnected.value.code == 1008
+
+        with client.websocket_connect(
+            "/ws/stream",
+            headers={"origin": "file://"},
+            subprotocols=["frame-v1", "session-secret"],
+        ) as websocket:
+            assert websocket.accepted_subprotocol == "frame-v1"
+        client.post("/camera/stop", headers={"X-Frame-Session": "session-secret"})
+
+
+def test_desktop_shutdown_hook_requires_matching_session_and_shutdown_tokens(monkeypatch):
+    with make_client() as client:
+        requested = []
+        client.app.state.request_desktop_shutdown = lambda: requested.append(True)
+        monkeypatch.setenv("FRAME_DESKTOP_SESSION_TOKEN", "session-secret")
+        monkeypatch.setenv("FRAME_DESKTOP_SHUTDOWN_TOKEN", "shutdown-secret")
+
+        wrong_session = client.post(
+            "/internal/shutdown",
+            headers={"X-Frame-Session": "wrong", "X-Frame-Shutdown-Token": "shutdown-secret"},
+        )
+        assert wrong_session.status_code == 404
+        wrong_shutdown = client.post(
+            "/internal/shutdown",
+            headers={"X-Frame-Session": "session-secret", "X-Frame-Shutdown-Token": "wrong"},
+        )
+        assert wrong_shutdown.status_code == 404
+        accepted = client.post(
+            "/internal/shutdown",
+            headers={"X-Frame-Session": "session-secret", "X-Frame-Shutdown-Token": "shutdown-secret"},
+        )
+        assert accepted.status_code == 200
+        assert requested == [True]

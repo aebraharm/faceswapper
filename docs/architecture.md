@@ -11,15 +11,25 @@
 ## Components
 
 ```text
+Electron main (frontend/electron/main.ts)
+  ├─ chooses a free loopback port, starts the Python sidecar, waits for /health
+  ├─ injects no Node APIs into renderer; creates context-isolated/sandboxed window
+  ├─ grants one camera permission only after the renderer Start Camera action
+  └─ requests authenticated graceful shutdown, then terminates child if needed
+
+Electron preload (frontend/electron/preload.ts)
+  └─ exposes only runtime URLs/session token, camera authorization, backend errors
+
 React UI (frontend/src/App.tsx)
   ├─ browser getUserMedia, camera picker, original preview
   ├─ source photo upload, face selection, model/target/settings controls
   ├─ WebSocket JPEG sender + processed canvas + live telemetry
-  └─ canvas.captureStream() browser integration helper
+  └─ canvas.captureStream() browser integration helper (not a system camera)
 
-FastAPI (backend/app/main.py)
+FastAPI sidecar (backend/app/main.py; started by backend/launcher.py)
+  ├─ binds only to 127.0.0.1; requires the Electron session token in desktop mode
   ├─ API routes (api/routes.py) and bounded WebSocket (camera/websocket.py)
-  ├─ FaceAnalyzer (MediaPipe Face Mesh; OpenCV Haar fallback)
+  ├─ FaceAnalyzer (MediaPipe Face Mesh/Tasks when configured; OpenCV Haar fallback)
   ├─ FaceAligner + SourceFaceStore (in-memory selection/features)
   ├─ CameraSession + TargetFaceTracker + FrameProcessor
   ├─ FaceTransformer contract + ONNX Runtime adapter/manager
@@ -52,4 +62,4 @@ The processed frame is displayed on a canvas. The frontend's `getProcessedVideoS
 
 ## Trust boundary
 
-The UI uses a relative same-origin API/WebSocket URL; Vite proxies these in development. Uploads are never executed, stored on disk, or publicly served. Run the development server on a trusted machine/network only: this MVP does not add authentication, CSRF protection, tenant isolation, or hostile-network hardening.
+The web UI uses a relative API/WebSocket URL; Vite proxies these in ordinary development. The Electron renderer obtains a per-launch loopback URL and token from the isolated preload bridge. The packaged sidecar binds only to 127.0.0.1 and rejects requests without the session token; Electron also validates the expected renderer origins for WebSockets. Uploads are never executed, stored on disk, or publicly served. The standalone web-development backend remains intended for a trusted machine/network; it is not a multi-user or hostile-network service.

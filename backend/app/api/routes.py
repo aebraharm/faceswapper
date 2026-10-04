@@ -1,7 +1,10 @@
 """Validated HTTP routes for local camera, source, model and performance state."""
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request
+import hmac
+import os
+
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 
 from app.api.schemas import CameraSettingsRequest, CameraStartRequest, SourceFaceSelectionRequest, TargetSelectionRequest, TransformerLoadRequest
 from app.detection.image_validation import ImageValidationError, decode_source_image
@@ -192,3 +195,18 @@ def performance(request: Request) -> dict[str, object]:
         "landmarks_available": state.analyzer.landmarks_available,
         "output": output_capabilities(),
     }
+
+
+@router.post("/internal/shutdown", include_in_schema=False)
+def request_desktop_shutdown(request: Request, background_tasks: BackgroundTasks) -> dict[str, bool]:
+    """Authenticated sidecar shutdown hook used only by the Electron parent process."""
+    expected = os.getenv("FRAME_DESKTOP_SHUTDOWN_TOKEN", "")
+    supplied = request.headers.get("x-frame-shutdown-token", "")
+    if not expected or not hmac.compare_digest(expected, supplied):
+        # Do not disclose the endpoint to unrelated local browser pages.
+        raise HTTPException(status_code=404, detail="Not found.")
+    shutdown = getattr(request.app.state, "request_desktop_shutdown", None)
+    if shutdown is None:
+        raise HTTPException(status_code=503, detail="Desktop shutdown hook is unavailable.")
+    background_tasks.add_task(shutdown)
+    return {"ok": True}

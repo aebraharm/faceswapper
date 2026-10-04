@@ -1,6 +1,6 @@
 # FRAME — Real-time Face AI
 
-A local-first web application for opt-in, webcam-based face transformation. Choose a source portrait, have its face detected/aligned, start the camera explicitly, and inspect a live processed preview with target tracking, performance telemetry, and model status.
+A local-first face-transformation application with a React/Vite development UI and an Electron Windows desktop shell. Choose a source portrait, start the camera explicitly, and inspect a live processed preview with target tracking, performance telemetry, and model status. Electron launches the Python/FastAPI computer-vision backend as a loopback-only sidecar.
 
 > **Model-weight status:** no identity-swapping weights are included. The app ships with face detection, reusable alignment, camera streaming, masking/blending, a replaceable `FaceTransformer` interface, and an ONNX Runtime adapter. MediaPipe landmarks are optional; OpenCV detection/alignment fallback runs without them. A compatible, properly licensed model bundle must be installed locally before identity transformation can be enabled. Without it, the live preview and face analysis still work, and the transform switch fails closed rather than pretending a pasted overlay is an identity transformation.
 
@@ -17,11 +17,14 @@ A local-first web application for opt-in, webcam-based face transformation. Choo
 ## Architecture
 
 ```text
-frontend (React + TypeScript + Vite)
-  getUserMedia (explicit click) -> original preview
-  JPEG frames -------------------------------> WebSocket /ws/stream
-  processed JPEG + telemetry <--------------- FastAPI
-  processed canvas -> captureStream() -> browser WebRTC integration
+Electron main (desktop only)
+  starts Python sidecar on an ephemeral 127.0.0.1 port; waits for /health
+  └─ hardened BrowserWindow + context-isolated preload bridge
+       └─ frontend (React + TypeScript + Vite)
+            getUserMedia (explicit click) -> original preview
+            JPEG frames ---------------------> local WebSocket /ws/stream
+            processed JPEG + telemetry <----- local FastAPI sidecar
+            processed canvas -> browser integration only (not a system camera)
 
 backend (FastAPI)
   upload -> validate -> detect faces -> select -> align -> cached source representation
@@ -29,12 +32,14 @@ backend (FastAPI)
        -> soft mask + inverse warp -> JPEG output
 ```
 
+The regular web-development workflow is retained. In Electron, HTTP and WebSocket calls use the runtime URL supplied by preload; the backend binds only to loopback and is protected by a per-launch session token.
+
 The source upload uses a bounded raw-image request body (not multipart temp-file uploads) and the backend stores no upload on disk. The backend is organized by responsibility under `backend/app/`: `detection`, `landmarks`, `alignment`, `transformation`, `blending`, `camera`, and `output`. Read [docs/architecture.md](docs/architecture.md) for the request and frame flows.
 
 ## Requirements
 
 - Python 3.11+
-- Node.js 20+
+- Node.js 22.12+ for the current npm toolchain (web and Electron workflows).
 - A modern browser with WebRTC-era media APIs (`getUserMedia`, WebSocket, Canvas); camera use requires HTTPS or localhost.
 - Optional: a MediaPipe face-landmarker asset, ONNX Runtime-compatible model bundle, and compatible accelerator/runtime for GPU inference.
 
@@ -49,7 +54,7 @@ python -m pip install --upgrade pip
 pip install -r backend/requirements.txt
 
 # Start from the repository root:
-PYTHONPATH=backend uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8000 --reload
+PYTHONPATH=backend uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000 --reload
 ```
 
 API docs: <http://localhost:8000/docs>. Health check: <http://localhost:8000/health>.
@@ -71,6 +76,10 @@ For a frontend production build:
 ```bash
 cd frontend && npm run build
 ```
+
+### Windows desktop app
+
+Electron development, local Python-sidecar startup, secure camera permission handling, Windows PyInstaller packaging, and the NSIS installer workflow are documented in [docs/desktop-windows.md](docs/desktop-windows.md). In short, run `npm run dev:desktop` from `frontend` for the desktop window or `npm run dist:win` on Windows to build the installer.
 
 ### 3. Use the app
 
@@ -154,9 +163,11 @@ The tests use synthetic images/frames and fake detectors/models; physical camera
 
 ```text
 backend/app/          FastAPI service and modular vision pipeline
+backend/launcher.py   loopback-only Electron sidecar entry point
 backend/tests/        validation, alignment, model, frame and API tests
 frontend/src/         React/TypeScript UI, API client, browser output adapter
+frontend/electron/    Electron main process and secure preload bridge
 models/README.md      model acquisition notes and ONNX ABI
-scripts/              local setup/run helpers
-docs/                 architecture and pipeline notes
+scripts/              local setup/run and Windows packaging helpers
+docs/                 architecture, pipeline and desktop notes
 ```

@@ -2,11 +2,21 @@
   "name": "realtime-face-transform-frontend",
   "private": true,
   "version": "0.1.0",
-  "type": "module",
+  "type": "commonjs",
+  "main": "dist-electron/electron/main.js",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
-    "build": "tsc -b && vite build",
-    "preview": "vite preview --host 0.0.0.0"
+    "dev:desktop:renderer": "vite --host 127.0.0.1",
+    "dev:desktop": "npm run build:electron && concurrently --kill-others --success first \"npm:dev:desktop:renderer\" \"wait-on http://127.0.0.1:5173 && electron .\"",
+    "build:frontend": "tsc -b && vite build",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "build": "npm run build:frontend && npm run build:electron",
+    "typecheck": "tsc -b && tsc -p tsconfig.electron.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "preview": "vite preview --host 0.0.0.0",
+    "package:win": "electron-builder --win nsis --x64",
+    "dist:win": "powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/build-windows.ps1"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.3.4",
@@ -16,8 +26,54 @@
     "vite": "^6.0.7"
   },
   "devDependencies": {
+    "@types/node": "^22.20.5",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
-    "typescript": "~5.6.3"
+    "concurrently": "^10.0.5",
+    "electron": "^44.5.1",
+    "electron-builder": "^26.15.3",
+    "typescript": "~5.6.3",
+    "vitest": "^5.0.3",
+    "wait-on": "^9.5.1"
+  },
+  "build": {
+    "appId": "com.frame.realtimefaceai",
+    "productName": "FRAME",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../backend/dist/FrameBackend",
+        "to": "backend",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "FRAME-${version}-Setup-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
   }
 }

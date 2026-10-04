@@ -105,6 +105,28 @@ function App() {
 
   useEffect(() => {
     let mounted = true;
+    const removeBackendErrorListener = window.frameDesktop?.onBackendError((message) => {
+      setCameraError(`Local AI backend stopped: ${message}`);
+      setBackendReady(false);
+      intentionallyStoppingRef.current = true;
+      if (sendAnimationRef.current !== null) cancelAnimationFrame(sendAnimationRef.current);
+      sendAnimationRef.current = null;
+      socketRef.current?.close();
+      socketRef.current = null;
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+      outputStreamRef.current?.getTracks().forEach((track) => track.stop());
+      outputStreamRef.current = null;
+      delete window.faceTransformOutput;
+      if (videoRef.current) videoRef.current.srcObject = null;
+      setOutputEnabled(false);
+      setCameraLive(false);
+      setCameraBusy(false);
+      setTransformEnabled(false);
+      setTransformationRunning(false);
+      setTargetFaces([]);
+      setSelectedTarget(null);
+    });
     Promise.all([api.health(), api.sourceStatus(), api.transformerStatus()])
       .then(([health, sourceStatus, modelStatus]) => {
         if (!mounted) return;
@@ -121,6 +143,7 @@ function App() {
     return () => {
       mounted = false;
       navigator.mediaDevices?.removeEventListener?.('devicechange', refreshDevices);
+      removeBackendErrorListener?.();
       intentionallyStoppingRef.current = true;
       if (sendAnimationRef.current !== null) cancelAnimationFrame(sendAnimationRef.current);
       socketRef.current?.close();
@@ -231,6 +254,10 @@ function App() {
     let localStream: MediaStream | null = null;
     let connectingSocket: WebSocket | null = null;
     try {
+      const desktopCameraAuthorized = await window.frameDesktop?.authorizeCamera();
+      if (window.frameDesktop && desktopCameraAuthorized === false) {
+        throw new Error('The desktop camera permission could not be authorized. Try again from the Start camera button.');
+      }
       const videoConstraints: MediaTrackConstraints = selectedDevice
         ? { deviceId: { exact: selectedDevice }, width: { ideal: 1280 }, height: { ideal: 720 } }
         : { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' };
@@ -245,7 +272,17 @@ function App() {
       await api.startCamera(selectedDevice || null);
 
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const socket = new WebSocket(`${protocol}//${window.location.host}/ws/stream`);
+      let runtime = null;
+      try {
+        runtime = (await window.frameDesktop?.getRuntimeConfig()) ?? null;
+      } catch {
+        // Browser/Vite mode uses the same-origin WebSocket proxy below.
+      }
+      const socketUrl = runtime
+        ? `${runtime.websocketUrl}/ws/stream`
+        : `${protocol}//${window.location.host}/ws/stream`;
+      const protocols = runtime?.sessionToken ? ["frame-v1", runtime.sessionToken] : undefined;
+      const socket = protocols ? new WebSocket(socketUrl, protocols) : new WebSocket(socketUrl);
       connectingSocket = socket;
       socket.binaryType = 'blob';
       socket.onmessage = (event) => void handleFrameMessage(event);
@@ -588,12 +625,14 @@ function App() {
               </div>
               <div className="video-card">
                 <div className="video-card-head"><span><span className="video-index video-index--green">B</span> PROCESSED OUTPUT</span>
-                  {aiConfigured ? <span className="active-indicator"><span className="tiny-dot" /> AI TRANSFORM ON</span> : <span className="video-live-indicator">{cameraLive ? 'ANALYSIS ON' : 'STANDBY'}</span>}
+                  {transformationRunning
+                    ? <span className="active-indicator"><span className="tiny-dot" /> AI TRANSFORMATION ACTIVE</span>
+                    : <span className="video-live-indicator">{cameraLive ? (aiConfigured ? 'AI READY · WAITING' : 'ANALYSIS ON') : 'STANDBY'}</span>}
                 </div>
                 <div className={`video-stage processed-stage${cameraLive ? ' is-live' : ''}`}>
                   <canvas ref={processedCanvasRef} className="processed-canvas mirrored" />
                   {!cameraLive && <div className="video-placeholder"><div className="placeholder-icon placeholder-icon--green"><Sparkles size={21} /></div><strong>Processed preview</strong><span>Live detection and model output appear here</span></div>}
-                  {aiConfigured && <div className="active-banner"><span className="active-banner-dot" /> AI FACE TRANSFORMATION ACTIVE</div>}
+                  {cameraLive && transformationRunning && <div className="active-banner"><span className="active-banner-dot" /> AI FACE TRANSFORMATION ACTIVE</div>}
                   {cameraLive && targetNeedsSelection && <div className="selection-overlay">Select a target below</div>}
                   <span className="stage-corner stage-corner--tl" /><span className="stage-corner stage-corner--br" />
                 </div>

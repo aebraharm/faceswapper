@@ -1,7 +1,16 @@
 import type { CameraStatus, SourceFaceStatus, TransformerStatus } from '../types/api';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`/api${path}`, init);
+  let runtime = null;
+  try {
+    runtime = (await window.frameDesktop?.getRuntimeConfig()) ?? null;
+  } catch {
+    // If the desktop bridge is unavailable, use the regular Vite development proxy.
+  }
+  const url = runtime ? `${runtime.backendUrl}${path}` : `/api${path}`;
+  const requestInit = { ...init, headers: { ...(init?.headers as Record<string, string> | undefined) } };
+  if (runtime?.sessionToken) requestInit.headers["X-Frame-Session"] = runtime.sessionToken;
+  const response = await fetch(url, requestInit);
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
     const detail = typeof body.detail === 'string' ? body.detail : `Request failed (${response.status})`;

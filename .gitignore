@@ -26,6 +26,10 @@ build/
 .output/
 .vite/
 **/.vite/
+frontend/dist-electron/
+frontend/release/
+backend/dist/
+backend/build/
 *.tsbuildinfo
 
 # Local environment files and credentials; keep the safe template only
