@@ -1,0 +1,60 @@
+export interface FaceBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  confidence?: number | null;
+}
+
+export interface SourceFaceStatus {
+  uploaded: boolean;
+  face_count: number;
+  faces: FaceBox[];
+  selected_face_index: number | null;
+  ready: boolean;
+  model_ready: boolean;
+  width: number;
+  height: number;
+  storage: string;
+  format?: string;
+}
+
+export interface TransformerStatus {
+  loaded: boolean;
+  name: string;
+  device: string;
+  provider?: string | null;
+  error?: string | null;
+  requires_model_files?: boolean;
+}
+
+export interface CameraStatus {
+  active: boolean;
+  connected: boolean;
+  device_id?: string | null;
+  face_count: number;
+  faces: FaceBox[];
+  selected_target: number | null;
+  selected_target_index: number | null;
+  transform_enabled: boolean;
+  frames_processed: number;
+  fps: number;
+  latency_ms: number;
+  camera_resolution: string;
+  processing_resolution: number;
+}
+
+export interface FrameStats {
+  type: 'stats' | 'error';
+  message?: string;
+  fps?: number;
+  latency_ms?: number;
+  camera_resolution?: string;
+  processing_resolution?: number;
+  face_count?: number;
+  faces?: FaceBox[];
+  selected_target?: number | null;
+  transformation_active?: boolean;
+  model_status?: TransformerStatus;
+  device?: string;
+}
