@@ -21,15 +21,15 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7.0.0
         with:
           python-version: '3.11'
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7.0.1
         with:
           node-version: '22.12'
           cache: npm
@@ -71,9 +71,9 @@ jobs:
           if (Test-Path $mainExecutable) { throw 'Uninstall left the application executable behind.' }
 
       - name: Upload Windows installer
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.0
         with:
           name: FRAME-Windows-NSIS-x64
           path: frontend/release/FRAME-*-Setup-*.exe
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30
