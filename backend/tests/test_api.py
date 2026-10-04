@@ -48,6 +48,49 @@ def test_source_upload_rejects_image_without_a_face():
         assert "No face" in response.json()["detail"]
 
 
+def test_source_upload_receives_decodes_and_returns_valid_face_status():
+    with make_client() as client:
+        seen = {}
+        face = FaceObservation(BoundingBox(40, 32, 72, 88))
+
+        def analyze(rgb):
+            seen["shape"] = rgb.shape
+            seen["dtype"] = str(rgb.dtype)
+            seen["first_pixel"] = tuple(int(value) for value in rgb[0, 0])
+            return [face]
+
+        client.app.state.services.analyzer.analyze = analyze
+        response = client.post(
+            "/source-face/upload",
+            content=png_bytes(color=(12, 34, 56)),
+            headers={"Content-Type": "image/png"},
+        )
+
+        assert response.status_code == 200
+        assert seen == {"shape": (160, 160, 3), "dtype": "uint8", "first_pixel": (12, 34, 56)}
+        body = response.json()
+        assert body["uploaded"] is True
+        assert body["face_count"] == 1
+        assert body["faces"][0]["x"] == 40
+        assert body["selected_face_index"] == 0
+        assert body["ready"] is True
+        assert body["width"] == 160
+        assert body["height"] == 160
+        assert body["storage"] == "memory only"
+        assert body["format"] == "PNG"
+
+
+def test_source_upload_rejects_corrupted_image_with_clear_error():
+    with make_client() as client:
+        response = client.post(
+            "/source-face/upload",
+            content=b"not a decodable image",
+            headers={"Content-Type": "image/png"},
+        )
+        assert response.status_code == 422
+        assert "could not be decoded" in response.json()["detail"]
+
+
 def test_source_upload_rejects_mime_mismatch():
     with make_client() as client:
         response = client.post(
@@ -147,6 +190,37 @@ def test_packaged_renderer_can_preflight_authenticated_requests(monkeypatch):
         )
         assert response.status_code == 200
         assert response.headers["access-control-allow-origin"] == "null"
+
+
+def test_packaged_renderer_can_preflight_and_post_an_authenticated_image_upload(monkeypatch):
+    with make_client() as client:
+        monkeypatch.setenv("FRAME_DESKTOP_SESSION_TOKEN", "session-secret")
+        for origin in ("null", "file://"):
+            preflight = client.options(
+                "/source-face/upload",
+                headers={
+                    "Origin": origin,
+                    "Access-Control-Request-Method": "POST",
+                    "Access-Control-Request-Headers": "content-type,x-frame-session",
+                },
+            )
+            assert preflight.status_code == 200
+            assert preflight.headers["access-control-allow-origin"] == origin
+            assert "POST" in preflight.headers["access-control-allow-methods"]
+
+        client.app.state.services.analyzer.analyze = lambda image: []
+        response = client.post(
+            "/source-face/upload",
+            content=png_bytes(),
+            headers={
+                "Origin": "null",
+                "Content-Type": "image/png",
+                "X-Frame-Session": "session-secret",
+            },
+        )
+        assert response.status_code == 422
+        assert response.headers["access-control-allow-origin"] == "null"
+        assert "No face" in response.json()["detail"]
 
 
 def test_desktop_websocket_requires_session_subprotocol(monkeypatch):

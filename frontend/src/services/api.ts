@@ -1,4 +1,5 @@
 import type { CameraStatus, SourceFaceStatus, TransformerStatus } from '../types/api';
+import { getSourceImageContentType } from './sourceImage';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let runtime = null;
@@ -13,7 +14,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, requestInit);
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const detail = typeof body.detail === 'string' ? body.detail : `Request failed (${response.status})`;
+    if (runtime && response.status === 404) {
+      throw new Error('The local AI backend rejected this desktop session. Close and reopen FRAME, then try again.');
+    }
+    const detail = typeof body.detail === 'string' ? body.detail : `The local AI backend request failed (${response.status}).`;
     throw new Error(detail);
   }
   return body as T;
@@ -29,9 +33,13 @@ export const api = {
   health: () => request<{ status: string; landmarks_available: boolean }>('/health'),
   sourceStatus: () => request<SourceFaceStatus>('/source-face/status'),
   uploadSource: async (file: File): Promise<SourceFaceStatus> => {
+    const contentType = getSourceImageContentType(file);
+    if (!contentType) throw new Error('Choose a JPG, PNG, or WEBP image.');
     return request<SourceFaceStatus>('/source-face/upload', {
       method: 'POST',
-      headers: { 'Content-Type': file.type },
+      headers: { 'Content-Type': contentType },
+      // This API uses a raw image body, not multipart/form-data. The FastAPI
+      // endpoint streams and decodes these exact bytes in memory.
       body: file,
     });
   },

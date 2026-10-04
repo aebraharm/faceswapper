@@ -25,6 +25,7 @@ import {
 } from 'lucide-react';
 import { MetricCard } from './components/MetricCard';
 import { api } from './services/api';
+import { getSourceImageContentType } from './services/sourceImage';
 import { getProcessedVideoStream } from './services/output';
 import type { DesktopPreferences } from './types/desktop';
 import type { CameraStatus, FaceBox, FrameStats, SourceFaceStatus, TransformerStatus } from './types/api';
@@ -51,6 +52,9 @@ declare global {
 }
 
 function errorMessage(error: unknown): string {
+  if (error instanceof TypeError && /fetch|network/i.test(error.message)) {
+    return 'Could not reach the local AI backend. Check that the local engine is connected, then try again.';
+  }
   return error instanceof Error ? error.message : 'Something went wrong. Please try again.';
 }
 
@@ -66,6 +70,7 @@ function App() {
   const frameInFlightRef = useRef(false);
   const intentionallyStoppingRef = useRef(false);
   const previewUrlRef = useRef<string | null>(null);
+  const pendingPreviewUrlRef = useRef<string | null>(null);
 
   const [backendReady, setBackendReady] = useState(false);
   const [landmarksAvailable, setLandmarksAvailable] = useState(false);
@@ -83,7 +88,9 @@ function App() {
   const [selectedDevice, setSelectedDevice] = useState('');
   const [isDragging, setIsDragging] = useState(false);
   const [uploadBusy, setUploadBusy] = useState(false);
+  const [sourceUploadError, setSourceUploadError] = useState('');
   const [notice, setNotice] = useState('');
+  const [noticeTone, setNoticeTone] = useState<'success' | 'error'>('success');
   const [preferencesLoaded, setPreferencesLoaded] = useState(false);
   const [transformEnabled, setTransformEnabled] = useState(false);
   const [provider, setProvider] = useState<DesktopPreferences['provider']>('auto');
@@ -96,6 +103,11 @@ function App() {
   const [targetFaces, setTargetFaces] = useState<FaceBox[]>([]);
   const [selectedTarget, setSelectedTarget] = useState<number | null>(null);
   const [outputEnabled, setOutputEnabled] = useState(false);
+
+  const showNotice = (message: string, tone: 'success' | 'error' = 'success') => {
+    setNoticeTone(tone);
+    setNotice(message);
+  };
 
   const refreshDevices = useCallback(async () => {
     if (!navigator.mediaDevices?.enumerateDevices) return;
@@ -168,6 +180,7 @@ function App() {
       outputStreamRef.current?.getTracks().forEach((track) => track.stop());
       if (window.faceTransformOutput) delete window.faceTransformOutput;
       if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+      if (pendingPreviewUrlRef.current) URL.revokeObjectURL(pendingPreviewUrlRef.current);
     };
   }, [refreshDevices]);
 
@@ -183,7 +196,7 @@ function App() {
     if (!cameraLive) return;
     const timer = window.setTimeout(() => {
       void api.cameraSettings({ intensity, processing_resolution: resolution }).catch((error) => {
-        setNotice(errorMessage(error));
+        showNotice(errorMessage(error), 'error');
       });
     }, 120);
     return () => window.clearTimeout(timer);
@@ -259,7 +272,7 @@ function App() {
     setFps(0);
     setLatency(0);
     setCameraResolution('—');
-    if (showMessage) setNotice('Camera stopped. The local video track has been released.');
+    if (showMessage) showNotice('Camera stopped. The local video track has been released.');
   }, []);
 
   const startCamera = async () => {
@@ -342,7 +355,7 @@ function App() {
       connectingSocket = null;
       setCameraLive(true);
       setCameraBusy(false);
-      setNotice('Camera is live. Frames are sent to the local processor; no audio is captured.');
+      showNotice('Camera is live. Frames are sent to the local processor; no audio is captured.');
 
       const video = videoRef.current;
       const sourceCanvas = hiddenCaptureRef.current;
@@ -389,32 +402,70 @@ function App() {
   };
 
   const handleImageFile = async (file?: File) => {
-    if (!file) return;
-    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
-      setNotice('Choose a JPG, PNG, or WEBP image.');
+    if (!file || uploadBusy) return;
+    setSourceUploadError('');
+    setNotice('');
+
+    const contentType = getSourceImageContentType(file);
+    if (!contentType) {
+      setSourceUploadError('Choose a JPG, PNG, or WEBP image.');
+      if (fileInputRef.current) fileInputRef.current.value = '';
       return;
     }
     if (file.size > MAX_SOURCE_BYTES) {
-      setNotice('This image exceeds the 8 MB upload limit.');
+      setSourceUploadError('This image exceeds the 8 MB upload limit. Choose a smaller file.');
+      if (fileInputRef.current) fileInputRef.current.value = '';
       return;
     }
+
+    // Preview the user's local file immediately. Do not make rendering depend on
+    // the backend response: a no-face result or runtime/network failure must not
+    // make a valid first selection disappear.
+    let previewUrl: string;
+    try {
+      previewUrl = URL.createObjectURL(file);
+    } catch {
+      setSourceUploadError('The selected photo could not be opened for preview. Choose another JPG, PNG, or WEBP image.');
+      return;
+    }
+    const previousPreviewUrl = previewUrlRef.current;
+    const previousSource = source;
+    pendingPreviewUrlRef.current = previewUrl;
+    setSourcePreview(previewUrl);
+    setSource(emptySource);
+
     setUploadBusy(true);
-    setNotice('');
     try {
       const result = await api.uploadSource(file);
-      if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
-      const url = URL.createObjectURL(file);
-      previewUrlRef.current = url;
-      setSourcePreview(url);
+      if (previousPreviewUrl) URL.revokeObjectURL(previousPreviewUrl);
+      previewUrlRef.current = previewUrl;
+      pendingPreviewUrlRef.current = null;
       setSource(result);
-      setNotice(result.face_count > 1
+      setSourceUploadError('');
+      showNotice(result.face_count > 1
         ? `Found ${result.face_count} faces. Choose the source identity below.`
         : 'Source face detected and aligned in memory.');
-      if (fileInputRef.current) fileInputRef.current.value = '';
     } catch (error) {
-      setNotice(errorMessage(error));
+      const message = errorMessage(error);
+      pendingPreviewUrlRef.current = null;
+      if (previousSource.uploaded) {
+        // The backend keeps the previous valid source if replacement fails. Roll
+        // the preview/status back too, so face boxes and the active identity can
+        // never refer to a different photo than the one shown.
+        URL.revokeObjectURL(previewUrl);
+        previewUrlRef.current = previousPreviewUrl;
+        setSourcePreview(previousPreviewUrl);
+        setSource(previousSource);
+        setSourceUploadError(`${message} The previous source photo remains active.`);
+      } else {
+        if (previousPreviewUrl) URL.revokeObjectURL(previousPreviewUrl);
+        previewUrlRef.current = previewUrl;
+        setSource(emptySource);
+        setSourceUploadError(message);
+      }
     } finally {
       setUploadBusy(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
 
@@ -429,9 +480,9 @@ function App() {
     try {
       const selected = await api.selectSource(index);
       setSource(selected);
-      setNotice(`Source face ${index + 1} selected and aligned.`);
+      showNotice(`Source face ${index + 1} selected and aligned.`);
     } catch (error) {
-      setNotice(errorMessage(error));
+      showNotice(errorMessage(error), 'error');
     }
   };
 
@@ -442,11 +493,14 @@ function App() {
       setTransformEnabled(false);
       setTransformationRunning(false);
       if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+      if (pendingPreviewUrlRef.current) URL.revokeObjectURL(pendingPreviewUrlRef.current);
       previewUrlRef.current = null;
+      pendingPreviewUrlRef.current = null;
       setSourcePreview(null);
-      setNotice('Source photo removed from the application session.');
+      setSourceUploadError('');
+      showNotice('Source photo removed from the application session.');
     } catch (error) {
-      setNotice(errorMessage(error));
+      showNotice(errorMessage(error), 'error');
     }
   };
 
@@ -456,9 +510,9 @@ function App() {
       const loaded = await api.loadTransformer(provider);
       setModel(loaded);
       setSource(await api.sourceStatus());
-      setNotice(`Model loaded on ${loaded.device}. Source identity features are now prepared once.`);
+      showNotice(`Model loaded on ${loaded.device}. Source identity features are now prepared once.`);
     } catch (error) {
-      setNotice(errorMessage(error));
+      showNotice(errorMessage(error), 'error');
       setModel(await api.transformerStatus().catch(() => model));
     }
   };
@@ -470,9 +524,9 @@ function App() {
       setSource(await api.sourceStatus());
       setTransformEnabled(false);
       setTransformationRunning(false);
-      setNotice('Model unloaded and cached identity features cleared.');
+      showNotice('Model unloaded and cached identity features cleared.');
     } catch (error) {
-      setNotice(errorMessage(error));
+      showNotice(errorMessage(error), 'error');
     }
   };
 
@@ -481,9 +535,9 @@ function App() {
     try {
       await api.cameraSettings({ transform_enabled: next, intensity, processing_resolution: resolution });
       setTransformEnabled(next);
-      setNotice(next ? 'AI face transformation enabled.' : 'Transformation disabled. Original camera frames are shown.');
+      showNotice(next ? 'AI face transformation enabled.' : 'Transformation disabled. Original camera frames are shown.');
     } catch (error) {
-      setNotice(errorMessage(error));
+      showNotice(errorMessage(error), 'error');
     }
   };
 
@@ -492,7 +546,7 @@ function App() {
       const status: CameraStatus = await api.selectTarget(index);
       setSelectedTarget(status.selected_target_index);
     } catch (error) {
-      setNotice(errorMessage(error));
+      showNotice(errorMessage(error), 'error');
     }
   };
 
@@ -512,7 +566,7 @@ function App() {
       window.faceTransformOutput = stream;
       setOutputEnabled(true);
     } catch (error) {
-      setNotice(errorMessage(error));
+      showNotice(errorMessage(error), 'error');
     }
   };
 
@@ -559,7 +613,7 @@ function App() {
             </div>
             <div className="section-title-row">
               <div><h2 id="source-heading">Source face</h2><p>The identity you choose to apply</p></div>
-              {sourcePreview && <button className="icon-button" onClick={() => void removeSource()} aria-label="Remove source face" title="Remove source face"><Trash2 size={16} /></button>}
+              {sourcePreview && <button className="icon-button" onClick={() => void removeSource()} disabled={uploadBusy} aria-label="Remove source face" title="Remove source face"><Trash2 size={16} /></button>}
             </div>
 
             <div
@@ -568,11 +622,13 @@ function App() {
               onDragLeave={() => setIsDragging(false)}
               onDrop={onDrop}
               style={sourcePreview && source.width && source.height ? { aspectRatio: `${source.width} / ${source.height}` } : undefined}
+              aria-busy={uploadBusy}
             >
               {sourcePreview ? (
                 <>
-                  <img src={sourcePreview} alt="Selected source face" className="source-image" />
-                  <div className="source-scanline" />
+                  <img src={sourcePreview} alt="Selected source photo" className="source-image" />
+                  {uploadBusy && <div className="source-processing-indicator"><LoaderCircle className="spin" size={13} /> CHECKING PHOTO</div>}
+                  {source.uploaded && <div className="source-scanline" />}
                   {source.faces.map((face, index) => (
                     <button
                       key={index}
@@ -584,7 +640,7 @@ function App() {
                       title={`Select face ${index + 1}`}
                     ><span>{index + 1}</span></button>
                   ))}
-                  <div className="image-caption"><ScanFace size={14} /> {source.face_count} {source.face_count === 1 ? 'FACE' : 'FACES'} DETECTED</div>
+                  {source.uploaded && <div className="image-caption"><ScanFace size={14} /> {source.face_count} {source.face_count === 1 ? 'FACE' : 'FACES'} DETECTED</div>}
                 </>
               ) : (
                 <div className="drop-placeholder">
@@ -595,7 +651,7 @@ function App() {
                 </div>
               )}
             </div>
-            <input ref={fileInputRef} type="file" accept="image/jpeg,image/png,image/webp" hidden onChange={onFileChange} />
+            <input ref={fileInputRef} type="file" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" hidden onChange={onFileChange} />
             <div className="source-actions">
               <button className="button button--outline source-upload-button" onClick={() => fileInputRef.current?.click()} disabled={!backendReady || uploadBusy}>
                 {sourcePreview ? <Upload size={16} /> : <ImagePlus size={16} />}
@@ -615,9 +671,19 @@ function App() {
                 </div>
               </div>
             )}
-            <div className={`source-detection-note${source.ready ? ' note-ready' : ''}`}>
-              <span className="note-icon">{source.ready ? <Check size={14} /> : <ScanFace size={14} />}</span>
-              <span>{source.ready ? 'Face detected and aligned. Identity representation will be cached when a model is loaded.' : 'Upload a clear portrait to detect and align its face.'}</span>
+            <div
+              className={`source-detection-note${source.ready ? ' note-ready' : ''}${sourceUploadError ? ' note-error' : ''}`}
+              role={sourceUploadError ? 'alert' : 'status'}
+              aria-live={sourceUploadError ? 'assertive' : 'polite'}
+            >
+              <span className="note-icon">{sourceUploadError ? <AlertCircle size={14} /> : source.ready ? <Check size={14} /> : uploadBusy ? <LoaderCircle className="spin" size={14} /> : <ScanFace size={14} />}</span>
+              <span>{sourceUploadError || (uploadBusy
+                ? 'Checking the selected photo for a face…'
+                : source.ready
+                  ? 'Face detected and aligned. Identity representation will be cached when a model is loaded.'
+                  : source.face_count > 1
+                    ? 'Choose one detected source face above before continuing.'
+                    : 'Upload a clear portrait to detect and align its face.')}</span>
             </div>
           </section>
 
@@ -736,7 +802,7 @@ function App() {
             <button className={`button ${model.loaded ? 'button--outline' : 'button--dark'} model-action`} onClick={() => void (model.loaded ? unloadModel() : loadModel())} disabled={!backendReady}>
               {model.loaded ? <><ArrowDownToLine size={15} className="rotate-180" /> Unload model</> : <><Zap size={15} /> Load configured model</>}
             </button>
-            {!model.loaded && <a className="model-doc-link" href="/models/README.md" onClick={(event) => { event.preventDefault(); setNotice('See models/README.md in the repository for the model ABI, installation steps and licensing checklist.'); }}><CircleHelp size={13} /> Model setup & licensing <span>↗</span></a>}
+            {!model.loaded && <a className="model-doc-link" href="/models/README.md" onClick={(event) => { event.preventDefault(); showNotice('See models/README.md in the repository for the model ABI, installation steps and licensing checklist.'); }}><CircleHelp size={13} /> Model setup & licensing <span>↗</span></a>}
           </div>
 
           <div className="panel output-panel">
@@ -759,7 +825,7 @@ function App() {
           </div>
         </section>
 
-        {notice && <div className="notice-bar" role="status"><span><Check size={14} /></span><p>{notice}</p><button onClick={() => setNotice('')} aria-label="Dismiss message"><X size={15} /></button></div>}
+        {notice && <div className={`notice-bar${noticeTone === 'error' ? ' is-error' : ''}`} role={noticeTone === 'error' ? 'alert' : 'status'}><span>{noticeTone === 'error' ? <AlertCircle size={14} /> : <Check size={14} />}</span><p>{notice}</p><button onClick={() => setNotice('')} aria-label="Dismiss message"><X size={15} /></button></div>}
 
         <footer id="privacy" className="footer">
           <div className="footer-brand"><span className="footer-mark"><Aperture size={16} /></span><strong>FRAME</strong><span>Local-first face AI</span></div>
