@@ -1,0 +1,9 @@
+# Install after backend/requirements.txt with:
+#   pip install --no-deps -r backend/requirements-mediapipe.txt
+# This preserves the headless OpenCV wheel installed by requirements.txt.
+absl-py>=2.3
+flatbuffers>=25.9
+cffi>=1.15
+pycparser>=2.21
+sounddevice>=0.5
+mediapipe>=0.10.14,<0.11
