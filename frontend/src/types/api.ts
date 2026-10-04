@@ -26,6 +26,28 @@ export interface TransformerStatus {
   provider?: string | null;
   error?: string | null;
   requires_model_files?: boolean;
+  model_id?: string | null;
+}
+
+export interface ModelCatalogEntry {
+  id: string;
+  display_name: string;
+  license_name: string;
+  license_url: string;
+  source_url: string;
+  summary: string;
+  approx_total_bytes: number;
+  installed: boolean;
+  downloading: boolean;
+  bytes_downloaded: number;
+  total_bytes: number;
+  progress: number;
+  error?: string | null;
+}
+
+export interface ModelCatalogResponse {
+  models: ModelCatalogEntry[];
+  selected_model_id: string;
 }
 
 export interface CameraStatus {

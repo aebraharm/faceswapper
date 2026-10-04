@@ -15,6 +15,8 @@ export interface BackendCommandOptions {
   sessionToken: string;
   baseEnvironment: NodeJS.ProcessEnv;
   pythonExecutable?: string;
+  /** Per-user directory the backend should install/look up downloadable models in. */
+  modelsDirectory: string;
 }
 
 export interface BackendCommand {
@@ -78,6 +80,10 @@ export function createBackendCommand(options: BackendCommandOptions): BackendCom
     ...options.baseEnvironment,
     FRAME_DESKTOP_SESSION_TOKEN: options.sessionToken,
     FRAME_DESKTOP_SHUTDOWN_TOKEN: options.sessionToken,
+    // A developer's own shell export still wins (useful for local testing); the
+    // packaged app always points this at a per-user app-data directory so
+    // downloaded model weights never land inside the installer or Program Files.
+    FRAME_MODELS_DIR: options.baseEnvironment.FRAME_MODELS_DIR || options.modelsDirectory,
   };
   const portArgument = ['--port', String(options.port)];
 

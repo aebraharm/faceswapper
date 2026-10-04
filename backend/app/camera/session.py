@@ -9,6 +9,12 @@ from typing import Any
 
 class CameraSession:
     ALLOWED_RESOLUTIONS = (320, 480, 640, 720)
+    ALLOWED_PERFORMANCE_MODES = ("auto", "quality", "performance")
+    # Below this rolling average FPS, "auto" mode starts skipping model inference
+    # on alternating frames (holding the last composited result) instead of
+    # falling further behind or crashing.
+    _AUTO_SKIP_FPS_THRESHOLD = 6.0
+    _AUTO_SKIP_MIN_SAMPLES = 8
 
     def __init__(self, default_resolution: int = 640) -> None:
         self._lock = threading.RLock()
@@ -19,6 +25,7 @@ class CameraSession:
         self.transform_enabled = False
         self.intensity = 0.85
         self.processing_resolution = default_resolution if default_resolution in self.ALLOWED_RESOLUTIONS else 640
+        self.performance_mode = "auto"
         self.face_count = 0
         self.faces: list[dict[str, int | float | None]] = []
         self.selected_target: int | None = None
@@ -28,6 +35,8 @@ class CameraSession:
         self.camera_resolution = "—"
         self._latencies: deque[float] = deque(maxlen=90)
         self._frame_times: deque[float] = deque(maxlen=31)
+        self._inference_frame_counter = 0
+        self._skipped_last = False
 
     def start(self, device_id: str | None = None) -> None:
         with self._lock:
@@ -41,6 +50,8 @@ class CameraSession:
             self.fps = 0.0
             self._latencies.clear()
             self._frame_times.clear()
+            self._inference_frame_counter = 0
+            self._skipped_last = False
 
     def stop(self) -> None:
         with self._lock:
@@ -67,6 +78,7 @@ class CameraSession:
         transform_enabled: bool | None = None,
         intensity: float | None = None,
         processing_resolution: int | None = None,
+        performance_mode: str | None = None,
     ) -> dict[str, Any]:
         with self._lock:
             if transform_enabled is not None:
@@ -77,7 +89,33 @@ class CameraSession:
                 if processing_resolution not in self.ALLOWED_RESOLUTIONS:
                     raise ValueError(f"processing_resolution must be one of {self.ALLOWED_RESOLUTIONS}.")
                 self.processing_resolution = processing_resolution
+            if performance_mode is not None:
+                if performance_mode not in self.ALLOWED_PERFORMANCE_MODES:
+                    raise ValueError(f"performance_mode must be one of {self.ALLOWED_PERFORMANCE_MODES}.")
+                self.performance_mode = performance_mode
             return self.settings()
+
+    def should_run_inference(self) -> bool:
+        """Adaptive frame-skip: decide whether this frame should run the (expensive)
+        model transform, or reuse the last composited output to stay responsive.
+        """
+        with self._lock:
+            self._inference_frame_counter += 1
+            if self.performance_mode == "quality":
+                self._skipped_last = False
+                return True
+            if self.performance_mode == "performance":
+                skip = self._inference_frame_counter % 2 == 0
+                self._skipped_last = skip
+                return not skip
+            # auto: only start skipping once we have enough samples to trust the
+            # rolling FPS, and the stream is demonstrably struggling.
+            if self.frames_processed >= self._AUTO_SKIP_MIN_SAMPLES and 0 < self.fps < self._AUTO_SKIP_FPS_THRESHOLD:
+                skip = self._inference_frame_counter % 2 == 0
+                self._skipped_last = skip
+                return not skip
+            self._skipped_last = False
+            return True
 
     def select_target(self, index: int | None) -> None:
         with self._lock:
@@ -109,6 +147,7 @@ class CameraSession:
                 "transform_enabled": self.transform_enabled,
                 "intensity": self.intensity,
                 "processing_resolution": self.processing_resolution,
+                "performance_mode": self.performance_mode,
                 "device_id": self.device_id,
             }
 
@@ -128,4 +167,6 @@ class CameraSession:
                 "latency_ms": round(self.latency_ms, 1),
                 "camera_resolution": self.camera_resolution,
                 "processing_resolution": self.processing_resolution,
+                "performance_mode": self.performance_mode,
+                "skipped_last_frame": self._skipped_last,
             }

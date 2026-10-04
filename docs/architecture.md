@@ -32,7 +32,8 @@ FastAPI sidecar (backend/app/main.py; started by backend/launcher.py)
   ├─ FaceAnalyzer (MediaPipe Face Mesh/Tasks when configured; OpenCV Haar fallback)
   ├─ FaceAligner + SourceFaceStore (in-memory selection/features)
   ├─ CameraSession + TargetFaceTracker + FrameProcessor
-  ├─ FaceTransformer contract + ONNX Runtime adapter/manager
+  ├─ FaceTransformer contract + ONNX Runtime adapters + TransformerManager
+  ├─ Model catalog + ModelInstallManager (on-demand, verified downloads)
   └─ FaceCompositor (elliptical feathered mask + inverse affine warp)
 ```
 
@@ -46,7 +47,7 @@ The browser requests camera permission only when Start is clicked. It sends boun
 
 ### Model boundary
 
-`FaceTransformer` separates `load_model`, `prepare_source`, `transform`, and `unload_model`. `TransformerManager` owns the model lifecycle. The shipped `OnnxIdentityTransformer` requires a source encoder graph and a target-conditioned transformation graph with the ABI in `models/README.md`. No weights are included. Models with another input contract should be wrapped behind the same interface, leaving camera, alignment and UI services intact.
+`FaceTransformer` separates `load_model`, `prepare_source`, `transform`, and `unload_model`. `TransformerManager` owns the model lifecycle and picks, in order: (1) an explicit bring-your-own ONNX bundle (`OnnxIdentityTransformer`, two graphs with the ABI documented in `models/README.md`), or (2) an installed catalog model (currently `LivePortraitOnnxTransformer`, MIT-licensed, see `models/README.md`). If neither is available, `load()` raises `ModelNotConfiguredError` pointing at the Model Status panel and `models/README.md`. No weights are included in this repository; the catalog model is fetched on request by `ModelInstallManager` (`backend/app/transformation/model_manager.py`) into a per-user app-data directory (`FRAME_MODELS_DIR`, wired by Electron to `%LOCALAPPDATA%\FRAME\models`), verified by SHA-256 before use, and never re-downloaded automatically. `GET/POST/DELETE /models/...` (see `api/routes.py`) expose the catalog, per-model install status/progress, and removal to the UI. Models with another input contract should be wrapped behind the same `FaceTransformer` interface, leaving camera, alignment and UI services intact. A `MemoryError` (or other failure) raised mid-stream by a loaded model is converted by `TransformerManager.transform()` into a `RuntimeError` so `camera/websocket.py`'s per-frame handler can report it and keep the stream alive instead of crashing.
 
 ### Output
 

@@ -4,7 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 import { api } from './services/api';
-import type { SourceFaceStatus, TransformerStatus } from './types/api';
+import type { ModelCatalogEntry, SourceFaceStatus, TransformerStatus } from './types/api';
 
 const emptySource: SourceFaceStatus = {
   uploaded: false,
@@ -76,6 +76,7 @@ describe('source photo selection and preview', () => {
     vi.spyOn(api, 'uploadSource').mockResolvedValue(oneFaceSource);
     vi.spyOn(api, 'selectSource').mockResolvedValue({ ...twoFaceSource, selected_face_index: 1, ready: true });
     vi.spyOn(api, 'removeSource').mockResolvedValue({ ...emptySource, ok: true });
+    vi.spyOn(api, 'modelCatalog').mockResolvedValue({ models: [], selected_model_id: 'liveportrait-v1' });
     host = document.createElement('div');
     document.body.appendChild(host);
     root = createRoot(host);
@@ -213,5 +214,91 @@ describe('source photo selection and preview', () => {
     });
     expect(api.selectSource).toHaveBeenCalledWith(1);
     expect(host.textContent).toContain('FACE READY');
+  });
+});
+
+describe('installable model catalog', () => {
+  let host: HTMLDivElement;
+  let root: Root;
+
+  const notInstalled: ModelCatalogEntry = {
+    id: 'liveportrait-v1',
+    display_name: 'LivePortrait (identity-preserving reenactment)',
+    license_name: 'MIT',
+    license_url: 'https://github.com/KwaiVGI/LivePortrait/blob/main/LICENSE',
+    source_url: 'https://huggingface.co/warmshao/FasterLivePortrait',
+    summary: 'Drives the cached source identity with the live camera pose and expression.',
+    approx_total_bytes: 537_360_000,
+    installed: false,
+    downloading: false,
+    bytes_downloaded: 0,
+    total_bytes: 537_360_000,
+    progress: 0,
+    error: null,
+  };
+
+  beforeEach(() => {
+    Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', {
+      configurable: true,
+      writable: true,
+      value: true,
+    });
+    vi.restoreAllMocks();
+    vi.spyOn(api, 'health').mockResolvedValue({ status: 'ok', landmarks_available: false });
+    vi.spyOn(api, 'sourceStatus').mockResolvedValue(emptySource);
+    vi.spyOn(api, 'transformerStatus').mockResolvedValue(noModel);
+    vi.spyOn(api, 'modelCatalog').mockResolvedValue({ models: [notInstalled], selected_model_id: 'liveportrait-v1' });
+    host = document.createElement('div');
+    document.body.appendChild(host);
+    root = createRoot(host);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    host.remove();
+    vi.restoreAllMocks();
+  });
+
+  async function renderApp(): Promise<void> {
+    await act(async () => {
+      root.render(<App />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  }
+
+  it('shows the licensed catalog model and lets the user start an install', async () => {
+    vi.spyOn(api, 'installModel').mockResolvedValue({ ...notInstalled, downloading: true, progress: 0.1 });
+    await renderApp();
+
+    await vi.waitFor(() => expect(host.textContent).toContain('LivePortrait (identity-preserving reenactment)'));
+    expect(host.textContent).toContain('MIT license');
+
+    const installButton = Array.from(host.querySelectorAll('button')).find((button) => button.textContent?.includes('Install'));
+    expect(installButton).toBeDefined();
+    await act(async () => {
+      installButton?.click();
+      await Promise.resolve();
+    });
+
+    expect(api.installModel).toHaveBeenCalledWith('liveportrait-v1');
+  });
+
+  it('lets the user remove an already-installed model', async () => {
+    vi.spyOn(api, 'modelCatalog').mockResolvedValue({
+      models: [{ ...notInstalled, installed: true }],
+      selected_model_id: 'liveportrait-v1',
+    });
+    vi.spyOn(api, 'removeModel').mockResolvedValue({ ...notInstalled, installed: false });
+    await renderApp();
+
+    await vi.waitFor(() => expect(host.textContent).toContain('Remove'));
+    const removeButton = Array.from(host.querySelectorAll('button')).find((button) => button.textContent?.includes('Remove'));
+    await act(async () => {
+      removeButton?.click();
+      await Promise.resolve();
+    });
+
+    expect(api.removeModel).toHaveBeenCalledWith('liveportrait-v1');
   });
 });

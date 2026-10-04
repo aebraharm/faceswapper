@@ -10,6 +10,8 @@ from app.api.schemas import CameraSettingsRequest, CameraStartRequest, SourceFac
 from app.detection.image_validation import ImageValidationError, decode_source_image
 from app.output.video import output_capabilities
 from app.transformation.base import ModelNotConfiguredError
+from app.transformation.model_catalog import get_model
+from app.transformation.model_manager import ModelInstallError
 
 router = APIRouter()
 
@@ -87,6 +89,7 @@ def camera_settings(body: CameraSettingsRequest, request: Request) -> dict[str, 
             transform_enabled=body.transform_enabled,
             intensity=body.intensity,
             processing_resolution=body.processing_resolution,
+            performance_mode=body.performance_mode,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -157,6 +160,43 @@ def delete_source_face(request: Request) -> dict[str, object]:
     state.source_faces.clear()
     state.camera.configure(transform_enabled=False)
     return {"ok": True, **state.source_faces.status()}
+
+
+@router.get("/models/catalog")
+def models_catalog(request: Request) -> dict[str, object]:
+    state = services(request)
+    return {"models": state.model_store.list_status(), "selected_model_id": state.settings.selected_model_id}
+
+
+@router.get("/models/{model_id}/status")
+def model_status(model_id: str, request: Request) -> dict[str, object]:
+    state = services(request)
+    try:
+        return state.model_store.status(model_id)
+    except ModelInstallError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/models/{model_id}/install")
+def install_model(model_id: str, request: Request) -> dict[str, object]:
+    state = services(request)
+    try:
+        return state.model_store.install(model_id)
+    except ModelInstallError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.delete("/models/{model_id}")
+def remove_model(model_id: str, request: Request) -> dict[str, object]:
+    state = services(request)
+    if get_model(model_id) is None:
+        raise HTTPException(status_code=404, detail=f"Unknown model id: {model_id}")
+    if state.transformer.status().get("model_id") == model_id:
+        raise HTTPException(status_code=409, detail="Unload the model before removing its files.")
+    try:
+        return state.model_store.remove(model_id)
+    except ModelInstallError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/transformer/load")

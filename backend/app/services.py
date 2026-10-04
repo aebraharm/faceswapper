@@ -13,6 +13,7 @@ from app.detection.face_detector import OpenCVFaceDetector
 from app.landmarks.landmark_detector import MediaPipeLandmarkDetector
 from app.source_faces import SourceFaceStore
 from app.transformation.manager import TransformerManager
+from app.transformation.model_manager import ModelInstallManager
 
 
 @dataclass
@@ -25,6 +26,7 @@ class Services:
     source_faces: SourceFaceStore
     camera: CameraSession
     frame_processor: FrameProcessor
+    model_store: ModelInstallManager
 
 
 def create_services(settings: Settings | None = None) -> Services:
@@ -35,8 +37,9 @@ def create_services(settings: Settings | None = None) -> Services:
     analyzer = FaceAnalyzer(OpenCVFaceDetector(), landmarks)
     aligner = FaceAligner()
     compositor = FaceCompositor()
-    transformer = TransformerManager(config)
+    model_store = ModelInstallManager(config.resolved_models_dir())
+    transformer = TransformerManager(config, model_store)
     source_faces = SourceFaceStore(analyzer, aligner, transformer)
     camera = CameraSession(config.default_processing_resolution)
     processor = FrameProcessor(analyzer, aligner, compositor, transformer, source_faces, camera)
-    return Services(config, analyzer, aligner, compositor, transformer, source_faces, camera, processor)
+    return Services(config, analyzer, aligner, compositor, transformer, source_faces, camera, processor, model_store)

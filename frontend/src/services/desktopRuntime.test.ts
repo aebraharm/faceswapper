@@ -79,12 +79,28 @@ describe('packaged Electron paths and launch configuration', () => {
       sessionToken: 'launch-secret',
       baseEnvironment: { PATH: 'C:\\Windows\\System32' },
       pythonExecutable: 'C:\\Python311\\python.exe',
+      modelsDirectory: 'C:\\Users\\Ada\\AppData\\Local\\FRAME\\models',
     });
     expect(command.command).toBe(resolvePackagedBackendPath(resourcesPath, 'win32'));
     expect(command.args).toEqual(['--port', '43217']);
     expect(command.cwd).toBe('C:\\Users\\Ada\\AppData\\Local\\Programs\\FRAME\\resources\\backend');
     expect(command.env.FRAME_DESKTOP_SESSION_TOKEN).toBe('launch-secret');
     expect(command.env.FRAME_DESKTOP_SHUTDOWN_TOKEN).toBe('launch-secret');
+    expect(command.env.FRAME_MODELS_DIR).toBe('C:\\Users\\Ada\\AppData\\Local\\FRAME\\models');
+  });
+
+  it('lets a developer-exported FRAME_MODELS_DIR override the packaged per-user default', () => {
+    const command = createBackendCommand({
+      isPackaged: false,
+      resourcesPath: 'unused',
+      compiledMainDirectory: 'C:\\repo\\frontend\\dist-electron\\electron',
+      platform: 'win32',
+      port: 43_218,
+      sessionToken: 'launch-secret',
+      baseEnvironment: { PATH: 'C:\\Windows\\System32', FRAME_MODELS_DIR: 'C:\\custom\\models' },
+      modelsDirectory: 'C:\\Users\\Ada\\AppData\\Local\\FRAME Development\\models',
+    });
+    expect(command.env.FRAME_MODELS_DIR).toBe('C:\\custom\\models');
   });
 
   it('resolves the development Python launcher relative to the compiled Electron main process', () => {

@@ -111,4 +111,25 @@ describe('runtime API routing', () => {
     fetchMock.mockResolvedValueOnce(makeResponse({ detail: 'backend unavailable' }, false));
     await expect(api.health()).rejects.toThrow('backend unavailable');
   });
+
+  it('fetches the installable model catalog', async () => {
+    vi.stubGlobal('window', {});
+    fetchMock.mockResolvedValueOnce(makeResponse({ models: [], selected_model_id: 'liveportrait-v1' }));
+    const response = await api.modelCatalog();
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/models/catalog');
+    expect(response.selected_model_id).toBe('liveportrait-v1');
+  });
+
+  it('starts an install and can remove an installed model by id', async () => {
+    vi.stubGlobal('window', {});
+    fetchMock.mockResolvedValueOnce(makeResponse({ id: 'liveportrait-v1', installed: false, downloading: true }));
+    await api.installModel('liveportrait-v1');
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/models/liveportrait-v1/install');
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ method: 'POST' });
+
+    fetchMock.mockResolvedValueOnce(makeResponse({ id: 'liveportrait-v1', installed: false, downloading: false }));
+    await api.removeModel('liveportrait-v1');
+    expect(fetchMock.mock.calls[1]?.[0]).toBe('/api/models/liveportrait-v1');
+    expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({ method: 'DELETE' });
+  });
 });
