@@ -37,7 +37,7 @@ class SourceFaceStore:
         self._height = 0
 
     def upload(self, source_rgb: np.ndarray) -> dict[str, Any]:
-        diagnostics = FrameDiagnostics() if self._diagnostics_enabled else None
+        diagnostics = FrameDiagnostics(trace_kind="source_upload") if self._diagnostics_enabled else None
         scope = diagnostics.activate() if diagnostics is not None else nullcontext()
         try:
             with scope:

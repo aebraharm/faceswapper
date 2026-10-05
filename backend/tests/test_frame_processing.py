@@ -81,6 +81,8 @@ def test_opt_in_frame_diagnostics_trace_capture_and_jpeg_decode_boundaries(caplo
         output, stats = processor.process_jpeg(make_jpeg())
 
     trace = stats["frame_diagnostics"]
+    assert trace["trace_kind"] == "live_camera_frame"
+    assert isinstance(trace["trace_id"], str) and trace["trace_id"] == stats["frame_diagnostics_id"]
     assert trace["first_invalid"] is None
     stages = {entry["stage"]: entry for entry in trace["stages"]}
     assert stages["camera_capture.bgr"]["channel_order"] == "BGR"
@@ -92,7 +94,8 @@ def test_opt_in_frame_diagnostics_trace_capture_and_jpeg_decode_boundaries(caplo
     assert stages["serialization.jpeg.decoded_bgr"]["all_zero"] is False
     assert output.startswith(b"\xff\xd8") and output.endswith(b"\xff\xd9")
     logged = [json.loads(record.message) for record in caplog.records if record.name == "app.camera.frame_diagnostics"]
-    assert logged[-1]["type"] == "frame_diagnostics"
+    assert logged[-1]["type"] == "live_camera_frame_diagnostics"
+    assert logged[-1]["trace_id"] == trace["trace_id"]
 
 
 def test_real_liveportrait_512_pipeline_preserves_a_nonblack_decodable_camera_frame(tmp_path):
@@ -148,7 +151,25 @@ def test_real_liveportrait_512_pipeline_preserves_a_nonblack_decodable_camera_fr
         assert decoded is not None and decoded.shape == (240, 320, 3)
         assert np.any(decoded != 0)
         trace = stats["frame_diagnostics"]
+        assert trace["trace_kind"] == "live_camera_frame"
+        assert trace["trace_id"] == stats["frame_diagnostics_id"]
         assert trace["first_invalid"] is None
+        stage_names = [entry["stage"] for entry in trace["stages"]]
+        required_order = [
+            "camera_capture.jpeg",
+            "preprocessing.work_rgb",
+            "target_tracker.selection",
+            "alignment.target_rgb_256",
+            "liveportrait.target_face_rgb",
+            "liveportrait.driving_keypoints",
+            "liveportrait.warping_spade.run_start",
+            "liveportrait.warping_spade.native_output_nchw",
+            "liveportrait.warping_spade.native_output_rgb",
+            "compositor.resampled_rgb_256",
+            "serialization.jpeg",
+        ]
+        positions = [stage_names.index(stage) for stage in required_order]
+        assert positions == sorted(positions)
         stages = {entry["stage"]: entry for entry in trace["stages"]}
         invocation = stages["liveportrait.warping_spade.run_start"]
         assert invocation["metadata_output_size"] == [512, 512]

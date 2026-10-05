@@ -132,8 +132,12 @@ class FrameDiagnostics:
     cannot obscure the first place the image became unusable.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, trace_kind: str = "unspecified") -> None:
         self.trace_id = uuid4().hex
+        # A source upload and a camera frame have intentionally separate traces.
+        # Keeping the lifecycle explicit prevents cached-source preparation facts
+        # from being mistaken for a live LivePortrait inference.
+        self.trace_kind = trace_kind
         self._stages: list[dict[str, Any]] = []
         self._first_invalid: dict[str, str] | None = None
 
@@ -272,6 +276,7 @@ class FrameDiagnostics:
         elif not detail["jpeg_soi"] or not detail["jpeg_eoi"]:
             detail["invalid"] = "missing JPEG boundary marker"
             self._invalid(stage, "missing JPEG boundary marker")
+        decoded: np.ndarray | None = None
         if decode_image:
             decoded = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_COLOR)
             detail["decode_valid"] = decoded is not None
@@ -284,19 +289,31 @@ class FrameDiagnostics:
                     "width": int(decoded.shape[1]),
                     "channels": int(decoded.shape[2]),
                 }
-                self.record_image(f"{stage}.decoded_bgr", decoded, channel_order="BGR")
+        # Append the encoded boundary before its decoded verification so the
+        # stage list matches the actual data-flow order.
         self._stages.append(detail)
+        if decoded is not None:
+            self.record_image(f"{stage}.decoded_bgr", decoded, channel_order="BGR")
 
     def record_error(self, stage: str, message: str) -> None:
         self._stages.append({"stage": stage, "kind": "error", "message": message})
         self._invalid(stage, message)
 
     def report(self) -> dict[str, Any]:
-        return {"trace_id": self.trace_id, "first_invalid": self._first_invalid, "stages": self._stages}
+        return {
+            "trace_id": self.trace_id,
+            "trace_kind": self.trace_kind,
+            "first_invalid": self._first_invalid,
+            "stages": self._stages,
+        }
 
     def log(self) -> None:
-        """Emit one JSON-lines record per sampled frame, never one per boundary."""
+        """Emit one JSON-lines record per sampled trace, never one per boundary."""
         logger.warning(
             "%s",
-            json.dumps({"type": "frame_diagnostics", **self.report()}, separators=(",", ":"), sort_keys=True),
+            json.dumps(
+                {"type": f"{self.trace_kind}_diagnostics", **self.report()},
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
         )

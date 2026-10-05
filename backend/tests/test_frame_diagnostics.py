@@ -23,7 +23,8 @@ def test_frame_diagnostics_file_is_json_lines_and_rotates_in_the_configured_loca
             record_event("test.detector", {"detections": 1})
         trace.log()
         payload = json.loads(path.read_text(encoding="utf-8").strip())
-        assert payload["type"] == "frame_diagnostics"
+        assert payload["type"] == "unspecified_diagnostics"
+        assert payload["trace_kind"] == "unspecified"
         assert isinstance(payload["trace_id"], str) and payload["trace_id"]
         assert payload["stages"] == [{"stage": "test.detector", "kind": "event", "detections": 1}]
     finally:

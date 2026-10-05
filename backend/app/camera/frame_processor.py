@@ -57,7 +57,7 @@ class FrameProcessor:
         if now < self._next_diagnostics_at:
             return None
         self._next_diagnostics_at = now + self._diagnostics_interval_seconds
-        return FrameDiagnostics()
+        return FrameDiagnostics(trace_kind="live_camera_frame")
 
     def record_frontend_diagnostics(self, values: dict[str, Any]) -> None:
         """Persist a renderer acknowledgement only for an already sampled frame."""
@@ -133,11 +133,35 @@ class FrameProcessor:
                     and target is not None
                 )
                 skipped_inference = False
+                record_event(
+                    "live_frame.transform_gate",
+                    {
+                        "transform_requested": bool(settings["transform_enabled"]),
+                        "model_loaded": bool(model_status["loaded"]),
+                        "source_model_ready": bool(source_status["model_ready"]),
+                        "target_available": target is not None,
+                        "transform_active": transform_active,
+                    },
+                )
                 if transform_active and target is not None:
                     representation = self.source_faces.representation()
                     if representation is not None:
                         self._record_source_representation(representation)
                         run_inference = self.camera.should_run_inference()
+                        will_reuse = (
+                            not run_inference
+                            and self._last_transformed_rgb is not None
+                            and self._last_transformed_rgb.shape == work.shape
+                        )
+                        record_event(
+                            "live_frame.inference_gate",
+                            {
+                                "source_representation_available": True,
+                                "should_run_inference": run_inference,
+                                "will_reuse_composite": will_reuse,
+                                "will_call_liveportrait_transform": not will_reuse,
+                            },
+                        )
                         if (
                             not run_inference
                             and self._last_transformed_rgb is not None
@@ -160,6 +184,15 @@ class FrameProcessor:
                             record_image("compositing.output_rgb", output, channel_order="RGB")
                             self._last_transformed_rgb = output
                     else:
+                        record_event(
+                            "live_frame.inference_gate",
+                            {
+                                "source_representation_available": False,
+                                "should_run_inference": False,
+                                "will_reuse_composite": False,
+                                "will_call_liveportrait_transform": False,
+                            },
+                        )
                         transform_active = False
                 else:
                     self._last_transformed_rgb = None

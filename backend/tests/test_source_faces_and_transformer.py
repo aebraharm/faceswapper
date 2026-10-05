@@ -99,6 +99,8 @@ def test_source_upload_emits_one_opt_in_comparison_trace(sample_rgb, caplog):
     with caplog.at_level("WARNING"):
         store.upload(sample_rgb)
     traces = [json.loads(record.message) for record in caplog.records if record.name == "app.camera.frame_diagnostics"]
+    assert traces[-1]["type"] == "source_upload_diagnostics"
+    assert traces[-1]["trace_kind"] == "source_upload"
     stages = {entry["stage"]: entry for entry in traces[-1]["stages"]}
     assert stages["source_upload.rgb"]["channel_order"] == "RGB"
     assert stages["source_upload.detection_result"]["face_count"] == 1
