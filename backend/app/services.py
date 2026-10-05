@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from app.alignment.face_aligner import FaceAligner
 from app.blending.compositor import FaceCompositor
+from app.camera.frame_diagnostics import configure_diagnostics_log
 from app.camera.frame_processor import FrameProcessor
 from app.camera.session import CameraSession
 from app.config import Settings
@@ -31,6 +32,7 @@ class Services:
 
 def create_services(settings: Settings | None = None) -> Services:
     config = settings or Settings.from_environment()
+    configure_diagnostics_log(config.resolved_frame_diagnostics_log_file())
     landmarks = MediaPipeLandmarkDetector(
         max_num_faces=4, task_model_path=config.resolved_model_path(config.face_landmarker_task)
     )
@@ -39,7 +41,7 @@ def create_services(settings: Settings | None = None) -> Services:
     compositor = FaceCompositor()
     model_store = ModelInstallManager(config.resolved_models_dir())
     transformer = TransformerManager(config, model_store)
-    source_faces = SourceFaceStore(analyzer, aligner, transformer)
+    source_faces = SourceFaceStore(analyzer, aligner, transformer, diagnostics_enabled=config.frame_diagnostics)
     camera = CameraSession(config.default_processing_resolution)
     processor = FrameProcessor(
         analyzer,

@@ -86,4 +86,5 @@ export interface FrameStats {
   device?: string;
   /** Present only when FRAME_FRAME_DIAGNOSTICS=1 on the local backend. */
   frame_diagnostics?: FrameDiagnostics;
+  frame_diagnostics_id?: string;
 }

@@ -33,6 +33,7 @@ class Settings:
     # while debugging a live camera does not produce a log line for every frame.
     frame_diagnostics: bool = False
     frame_diagnostics_interval_ms: int = 1_000
+    frame_diagnostics_log_file: str | None = None
 
     @classmethod
     def from_environment(cls) -> "Settings":
@@ -53,6 +54,7 @@ class Settings:
             onnx_intra_threads=int(intra_threads) if intra_threads else None,
             frame_diagnostics=diagnostics_value in {"1", "true", "yes", "on"},
             frame_diagnostics_interval_ms=max(1, int(os.getenv("FRAME_FRAME_DIAGNOSTICS_INTERVAL_MS", 1_000))),
+            frame_diagnostics_log_file=os.getenv("FRAME_FRAME_DIAGNOSTICS_LOG_FILE") or None,
         )
 
     def resolved_model_path(self, value: str | None) -> Path | None:
@@ -64,3 +66,13 @@ class Settings:
         # Development/CLI fallback. The Electron shell always sets FRAME_MODELS_DIR
         # to a per-user application-data directory (see desktop-paths.ts).
         return Path.home() / ".frame" / "models"
+
+    def resolved_frame_diagnostics_log_file(self) -> Path | None:
+        if not self.frame_diagnostics:
+            return None
+        if self.frame_diagnostics_log_file:
+            return Path(self.frame_diagnostics_log_file).expanduser().resolve()
+        # Electron gives the sidecar %LOCALAPPDATA%\FRAME\models, so this
+        # resolves to %LOCALAPPDATA%\FRAME\logs\frame-diagnostics.jsonl
+        # in the installed desktop application.
+        return self.resolved_models_dir().parent / "logs" / "frame-diagnostics.jsonl"

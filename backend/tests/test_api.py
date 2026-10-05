@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
@@ -176,6 +178,50 @@ def test_camera_websocket_returns_binary_preview_and_performance_stats():
             assert np.any(decoded != 0)
             # Output remains BGR JPEG data that a browser image decoder can draw.
             assert decoded[60, 80].mean() > 20
+        client.post("/camera/stop")
+
+
+def test_camera_websocket_accepts_sampled_renderer_diagnostics_acknowledgement(tmp_path):
+    import cv2
+    import numpy as np
+
+    settings = Settings(
+        source_encoder_model=None,
+        face_transformer_model=None,
+        frame_diagnostics=True,
+        models_dir=str(tmp_path / "models"),
+    )
+    with TestClient(create_app(settings)) as client:
+        acknowledgements = []
+        client.app.state.services.frame_processor.record_frontend_diagnostics = acknowledgements.append
+        client.post("/camera/start", json={})
+        ok, frame = cv2.imencode(".jpg", np.full((80, 96, 3), 140, dtype=np.uint8))
+        assert ok
+        with client.websocket_connect("/ws/stream") as websocket:
+            websocket.send_bytes(frame.tobytes())
+            stats = websocket.receive_json()
+            websocket.receive_bytes()
+            trace_id = stats["frame_diagnostics_id"]
+            websocket.send_text(json.dumps({
+                "type": "frame_diagnostics_displayed",
+                "trace_id": trace_id,
+                "bitmap_width": 96,
+                "bitmap_height": 80,
+                "drawn": True,
+            }))
+            # Sending another frame confirms the acknowledgement was consumed as
+            # control-plane telemetry, not returned as a protocol error.
+            websocket.send_bytes(frame.tobytes())
+            next_stats = websocket.receive_json()
+            websocket.receive_bytes()
+        assert acknowledgements == [{
+            "type": "frame_diagnostics_displayed",
+            "trace_id": trace_id,
+            "bitmap_width": 96,
+            "bitmap_height": 80,
+            "drawn": True,
+        }]
+        assert next_stats["type"] == "stats"
         client.post("/camera/stop")
 
 

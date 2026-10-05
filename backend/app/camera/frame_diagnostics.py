@@ -12,12 +12,56 @@ from contextlib import contextmanager
 from contextvars import ContextVar, Token
 import json
 import logging
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from typing import Any, Iterator
+from uuid import uuid4
 
 import cv2
 import numpy as np
 
 logger = logging.getLogger(__name__)
+_diagnostic_file_handler: RotatingFileHandler | None = None
+
+
+def configure_diagnostics_log(path: Path | None) -> None:
+    """Persist opt-in diagnostic JSON lines outside the packaged sidecar pipe.
+
+    Electron captures the sidecar's stdout/stderr for startup errors, so those
+    streams are not a reliable place for a Windows user to retrieve a live-frame
+    investigation.  This handler is installed only when diagnostics are enabled.
+    It stores aggregate tensor/image facts, never pixels or JPEG bytes, and keeps
+    the current file plus two 2 MiB rotations.
+    """
+    global _diagnostic_file_handler
+    if path is None:
+        if _diagnostic_file_handler is not None:
+            logger.removeHandler(_diagnostic_file_handler)
+            _diagnostic_file_handler.close()
+            _diagnostic_file_handler = None
+        return
+    resolved = path.expanduser().resolve()
+    if _diagnostic_file_handler is not None:
+        if Path(_diagnostic_file_handler.baseFilename) == resolved:
+            return
+        logger.removeHandler(_diagnostic_file_handler)
+        _diagnostic_file_handler.close()
+        _diagnostic_file_handler = None
+    try:
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(resolved, maxBytes=2 * 1024 * 1024, backupCount=2, encoding="utf-8")
+    except OSError as exc:
+        # Diagnostics must never prevent the local backend from starting. The
+        # regular warning stream remains available to a development launcher.
+        logger.warning("Could not create FRAME diagnostics log at %s: %s", resolved, exc)
+        return
+    # Each line is a self-contained JSON object emitted by FrameDiagnostics.log.
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    handler.setLevel(logging.WARNING)
+    logger.addHandler(handler)
+    logger.setLevel(logging.WARNING)
+    _diagnostic_file_handler = handler
+
 
 _current_trace: ContextVar["FrameDiagnostics | None"] = ContextVar("frame_diagnostics", default=None)
 
@@ -61,6 +105,25 @@ def record_error(stage: str, message: str) -> None:
         trace.record_error(stage, message)
 
 
+def record_event(stage: str, values: dict[str, Any]) -> None:
+    """Record small JSON-safe control-plane facts (detector, tracker, alignment)."""
+    trace = current_frame_diagnostics()
+    if trace is not None:
+        trace.record_event(stage, values)
+
+
+def log_frontend_frame_diagnostics(values: dict[str, Any]) -> None:
+    """Persist a sampled renderer decode/draw acknowledgement from the local UI."""
+    logger.warning(
+        "%s",
+        json.dumps(
+            {"type": "frontend_frame_diagnostics", **FrameDiagnostics._json_value(values)},
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+    )
+
+
 class FrameDiagnostics:
     """A compact JSON-safe trace for exactly one camera frame.
 
@@ -70,6 +133,7 @@ class FrameDiagnostics:
     """
 
     def __init__(self) -> None:
+        self.trace_id = uuid4().hex
         self._stages: list[dict[str, Any]] = []
         self._first_invalid: dict[str, str] | None = None
 
@@ -101,6 +165,24 @@ class FrameDiagnostics:
     def _invalid(self, stage: str, reason: str) -> None:
         if self._first_invalid is None:
             self._first_invalid = {"stage": stage, "reason": reason}
+
+    @staticmethod
+    def _json_value(value: Any) -> Any:
+        """Keep control-plane metadata compact and JSON serializable."""
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, dict):
+            return {str(key): FrameDiagnostics._json_value(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [FrameDiagnostics._json_value(item) for item in value]
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        return str(value)
+
+    def record_event(self, stage: str, values: dict[str, Any]) -> None:
+        self._stages.append({"stage": stage, "kind": "event", **self._json_value(values)})
 
     def record_image(
         self,
@@ -210,8 +292,11 @@ class FrameDiagnostics:
         self._invalid(stage, message)
 
     def report(self) -> dict[str, Any]:
-        return {"first_invalid": self._first_invalid, "stages": self._stages}
+        return {"trace_id": self.trace_id, "first_invalid": self._first_invalid, "stages": self._stages}
 
     def log(self) -> None:
-        """Emit one log record per sampled frame, never one record per boundary."""
-        logger.warning("FRAME frame diagnostics %s", json.dumps(self.report(), separators=(",", ":"), sort_keys=True))
+        """Emit one JSON-lines record per sampled frame, never one per boundary."""
+        logger.warning(
+            "%s",
+            json.dumps({"type": "frame_diagnostics", **self.report()}, separators=(",", ":"), sort_keys=True),
+        )

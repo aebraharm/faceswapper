@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import cv2
 import numpy as np
 import pytest
@@ -83,11 +85,14 @@ def test_opt_in_frame_diagnostics_trace_capture_and_jpeg_decode_boundaries(caplo
     stages = {entry["stage"]: entry for entry in trace["stages"]}
     assert stages["camera_capture.bgr"]["channel_order"] == "BGR"
     assert stages["preprocessing.rgb"]["channel_order"] == "RGB"
+    assert stages["face_analyzer.start"]["landmarks_available"] is False
+    assert stages["target_tracker.selection"]["detected_faces"] == []
     assert stages["serialization.jpeg"]["decode_valid"] is True
     assert stages["serialization.jpeg"]["decoded_dimensions"] == {"height": 240, "width": 320, "channels": 3}
     assert stages["serialization.jpeg.decoded_bgr"]["all_zero"] is False
     assert output.startswith(b"\xff\xd8") and output.endswith(b"\xff\xd9")
-    assert any("FRAME frame diagnostics" in record.message for record in caplog.records)
+    logged = [json.loads(record.message) for record in caplog.records if record.name == "app.camera.frame_diagnostics"]
+    assert logged[-1]["type"] == "frame_diagnostics"
 
 
 def test_real_liveportrait_512_pipeline_preserves_a_nonblack_decodable_camera_frame(tmp_path):

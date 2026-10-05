@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
+from app.camera.frame_diagnostics import record_event, record_image
 from app.detection.types import FaceObservation
 
 
@@ -28,6 +29,7 @@ class FaceAligner:
         if rgb is None or rgb.size == 0:
             raise ValueError("Cannot align an empty image.")
         matrix = self._landmark_matrix(face, size)
+        method = "landmarks5" if matrix is not None else "bounding_box"
         if matrix is None:
             matrix = self._box_matrix(face, rgb.shape[1], rgb.shape[0], size)
         aligned = cv2.warpAffine(
@@ -38,6 +40,20 @@ class FaceAligner:
             borderMode=cv2.BORDER_REFLECT_101,
         )
         inverse = cv2.invertAffineTransform(matrix)
+        record_image("alignment.output_rgb", aligned, channel_order="RGB")
+        record_event(
+            "alignment",
+            {
+                "method": method,
+                "input_dimensions": {"height": int(rgb.shape[0]), "width": int(rgb.shape[1]), "channels": int(rgb.shape[2])},
+                "bbox": face.as_dict(),
+                "landmarks5_shape": list(np.asarray(face.landmarks5).shape) if face.landmarks5 is not None else None,
+                "forward_matrix": matrix.astype(np.float32),
+                "inverse_matrix": inverse.astype(np.float32),
+                "output_size": int(size),
+                "matrix_finite": bool(np.isfinite(matrix).all() and np.isfinite(inverse).all()),
+            },
+        )
         return AlignedFace(aligned, matrix.astype(np.float32), inverse.astype(np.float32), size)
 
     @staticmethod

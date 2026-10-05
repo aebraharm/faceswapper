@@ -80,7 +80,7 @@ function App() {
   const pendingPreviewUrlRef = useRef<string | null>(null);
   // This is set only by the backend's opt-in sampled diagnostic stats frame;
   // normal production preview rendering does not write per-frame console logs.
-  const pendingFrameDiagnosticsRef = useRef(false);
+  const pendingFrameDiagnosticsRef = useRef<string | null>(null);
 
   const [backendReady, setBackendReady] = useState(false);
   const [landmarksAvailable, setLandmarksAvailable] = useState(false);
@@ -261,7 +261,7 @@ function App() {
         setTransformationRunning(Boolean(stats.transformation_active));
         if (stats.model_status) setModel(stats.model_status);
         if (stats.frame_diagnostics) {
-          pendingFrameDiagnosticsRef.current = true;
+          pendingFrameDiagnosticsRef.current = stats.frame_diagnostics_id ?? null;
           // The following binary WebSocket message is the JPEG described by this
           // trace. The paired bitmap log confirms Electron/browser decode and
           // canvas dimensions without adding a visual overlay or production spam.
@@ -272,31 +272,51 @@ function App() {
       }
       return;
     }
+    const traceId = pendingFrameDiagnosticsRef.current;
     try {
       const bitmap = await createImageBitmap(event.data as Blob);
       frameInFlightRef.current = false;
-      if (pendingFrameDiagnosticsRef.current) {
-        console.debug('[FRAME] frontend JPEG decode', {
-          bitmap_width: bitmap.width,
-          bitmap_height: bitmap.height,
-          canvas_before_draw: processedCanvasRef.current
-            ? { width: processedCanvasRef.current.width, height: processedCanvasRef.current.height }
-            : null,
-        });
-        pendingFrameDiagnosticsRef.current = false;
-      }
       const canvas = processedCanvasRef.current;
+      const canvasBeforeDraw = canvas ? { width: canvas.width, height: canvas.height } : null;
       const context = canvas?.getContext('2d');
+      let drawn = false;
       if (canvas && context) {
         if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
           canvas.width = bitmap.width;
           canvas.height = bitmap.height;
         }
         context.drawImage(bitmap, 0, 0);
+        drawn = true;
+      }
+      if (traceId) {
+        const diagnostic = {
+          type: 'frame_diagnostics_displayed',
+          trace_id: traceId,
+          bitmap_width: bitmap.width,
+          bitmap_height: bitmap.height,
+          canvas_before_draw: canvasBeforeDraw,
+          canvas_after_draw: canvas ? { width: canvas.width, height: canvas.height } : null,
+          canvas_context_available: Boolean(context),
+          drawn,
+        };
+        console.debug('[FRAME] frontend JPEG decode', diagnostic);
+        if (socketRef.current?.readyState === WebSocket.OPEN) socketRef.current.send(JSON.stringify(diagnostic));
+        pendingFrameDiagnosticsRef.current = null;
       }
       bitmap.close();
-    } catch {
+    } catch (error) {
       frameInFlightRef.current = false;
+      if (traceId) {
+        const diagnostic = {
+          type: 'frame_diagnostics_displayed',
+          trace_id: traceId,
+          bitmap_decode_failed: true,
+          error: error instanceof Error ? error.message : String(error),
+        };
+        console.debug('[FRAME] frontend JPEG decode failed', diagnostic);
+        if (socketRef.current?.readyState === WebSocket.OPEN) socketRef.current.send(JSON.stringify(diagnostic));
+        pendingFrameDiagnosticsRef.current = null;
+      }
       setCameraError('The processed video frame could not be displayed.');
     }
   }, []);

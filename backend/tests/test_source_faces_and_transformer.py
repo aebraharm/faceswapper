@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 
@@ -89,6 +91,18 @@ def test_source_face_upload_prepares_opencv_fallback_observation(sample_rgb):
     assert status["faces"] == [{"x": 20, "y": 20, "width": 100, "height": 120, "confidence": None}]
     assert status["model_ready"] is True
     assert model.prepared == 1
+
+
+def test_source_upload_emits_one_opt_in_comparison_trace(sample_rgb, caplog):
+    model = CountingTransformer()
+    store = SourceFaceStore(FakeAnalyzer(), FaceAligner(), ManagerStub(model), diagnostics_enabled=True)
+    with caplog.at_level("WARNING"):
+        store.upload(sample_rgb)
+    traces = [json.loads(record.message) for record in caplog.records if record.name == "app.camera.frame_diagnostics"]
+    stages = {entry["stage"]: entry for entry in traces[-1]["stages"]}
+    assert stages["source_upload.rgb"]["channel_order"] == "RGB"
+    assert stages["source_upload.detection_result"]["face_count"] == 1
+    assert stages["alignment"]["method"] == "bounding_box"
 
 
 def test_source_face_multiple_selection_and_cached_representation(sample_rgb):

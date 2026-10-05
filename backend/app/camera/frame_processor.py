@@ -10,7 +10,14 @@ import numpy as np
 
 from app.alignment.face_aligner import FaceAligner
 from app.blending.compositor import FaceCompositor
-from app.camera.frame_diagnostics import FrameDiagnostics, record_error, record_image, record_payload
+from app.camera.frame_diagnostics import (
+    FrameDiagnostics,
+    log_frontend_frame_diagnostics,
+    record_error,
+    record_event,
+    record_image,
+    record_payload,
+)
 from app.camera.session import CameraSession
 from app.camera.target_tracker import TargetFaceTracker
 from app.detection.analyzer import FaceAnalyzer
@@ -51,6 +58,11 @@ class FrameProcessor:
             return None
         self._next_diagnostics_at = now + self._diagnostics_interval_seconds
         return FrameDiagnostics()
+
+    def record_frontend_diagnostics(self, values: dict[str, Any]) -> None:
+        """Persist a renderer acknowledgement only for an already sampled frame."""
+        if self._diagnostics_enabled:
+            log_frontend_frame_diagnostics(values)
 
     @staticmethod
     def _record_source_representation(representation: Any) -> None:
@@ -96,6 +108,18 @@ class FrameProcessor:
                 observations = self.analyzer.analyze(work)
                 selected_preference = self.camera.status()["selected_target_index"]
                 selected_index, target = self._tracker.select(observations, selected_preference)
+                record_event(
+                    "target_tracker.selection",
+                    {
+                        "requested_index": selected_preference,
+                        "detected_faces": [face.as_dict() for face in observations],
+                        "selected_index": selected_index,
+                        "tracked_face": target.as_dict() if target is not None else None,
+                        "tracked_landmarks5_shape": list(np.asarray(target.landmarks5).shape)
+                        if target is not None and target.landmarks5 is not None
+                        else None,
+                    },
+                )
                 # If there is a single face the tracker chooses it automatically; multiple faces
                 # remain untouched until the user selects one explicitly.
                 self.camera.update_faces([face.as_dict() for face in observations], selected_index)
@@ -177,6 +201,7 @@ class FrameProcessor:
                 }
                 if diagnostics is not None:
                     stats["frame_diagnostics"] = diagnostics.report()
+                    stats["frame_diagnostics_id"] = diagnostics.trace_id
                 return frame, stats
         except Exception as exc:
             if diagnostics is not None:

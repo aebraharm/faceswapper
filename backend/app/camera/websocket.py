@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import json
 import os
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -39,6 +40,22 @@ async def camera_stream(websocket: WebSocket) -> None:
                 break
             payload = message.get("bytes")
             if payload is None:
+                text = message.get("text")
+                if text is not None and len(text) <= 8_192:
+                    try:
+                        acknowledgement = json.loads(text)
+                    except json.JSONDecodeError:
+                        acknowledgement = None
+                    if (
+                        isinstance(acknowledgement, dict)
+                        and acknowledgement.get("type") == "frame_diagnostics_displayed"
+                        and isinstance(acknowledgement.get("trace_id"), str)
+                    ):
+                        # The renderer sends this only for a sampled diagnostic
+                        # frame after createImageBitmap/canvas drawing. It closes
+                        # the last observable boundary without changing preview UI.
+                        state.frame_processor.record_frontend_diagnostics(acknowledgement)
+                        continue
                 await websocket.send_json({"type": "error", "message": "Expected a binary JPEG camera frame."})
                 continue
             if len(payload) > MAX_FRAME_BYTES:
