@@ -78,6 +78,9 @@ function App() {
   const intentionallyStoppingRef = useRef(false);
   const previewUrlRef = useRef<string | null>(null);
   const pendingPreviewUrlRef = useRef<string | null>(null);
+  // This is set only by the backend's opt-in sampled diagnostic stats frame;
+  // normal production preview rendering does not write per-frame console logs.
+  const pendingFrameDiagnosticsRef = useRef(false);
 
   const [backendReady, setBackendReady] = useState(false);
   const [landmarksAvailable, setLandmarksAvailable] = useState(false);
@@ -257,6 +260,13 @@ function App() {
         setSelectedTarget(stats.selected_target ?? null);
         setTransformationRunning(Boolean(stats.transformation_active));
         if (stats.model_status) setModel(stats.model_status);
+        if (stats.frame_diagnostics) {
+          pendingFrameDiagnosticsRef.current = true;
+          // The following binary WebSocket message is the JPEG described by this
+          // trace. The paired bitmap log confirms Electron/browser decode and
+          // canvas dimensions without adding a visual overlay or production spam.
+          console.debug('[FRAME] backend frame diagnostics', stats.frame_diagnostics);
+        }
       } catch {
         // Ignore malformed telemetry and keep the last good preview on screen.
       }
@@ -265,6 +275,16 @@ function App() {
     try {
       const bitmap = await createImageBitmap(event.data as Blob);
       frameInFlightRef.current = false;
+      if (pendingFrameDiagnosticsRef.current) {
+        console.debug('[FRAME] frontend JPEG decode', {
+          bitmap_width: bitmap.width,
+          bitmap_height: bitmap.height,
+          canvas_before_draw: processedCanvasRef.current
+            ? { width: processedCanvasRef.current.width, height: processedCanvasRef.current.height }
+            : null,
+        });
+        pendingFrameDiagnosticsRef.current = false;
+      }
       const canvas = processedCanvasRef.current;
       const context = canvas?.getContext('2d');
       if (canvas && context) {

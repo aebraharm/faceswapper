@@ -29,10 +29,15 @@ class Settings:
     models_dir: str | None = None
     selected_model_id: str = "liveportrait-v1"
     onnx_intra_threads: int | None = None
+    # Diagnostic tracing is deliberately opt-in. It is sampled so enabling it
+    # while debugging a live camera does not produce a log line for every frame.
+    frame_diagnostics: bool = False
+    frame_diagnostics_interval_ms: int = 1_000
 
     @classmethod
     def from_environment(cls) -> "Settings":
         intra_threads = os.getenv("FACE_ONNX_INTRA_THREADS")
+        diagnostics_value = os.getenv("FRAME_FRAME_DIAGNOSTICS", "").strip().lower()
         return cls(
             max_upload_bytes=int(os.getenv("FACE_MAX_UPLOAD_BYTES", 8 * 1024 * 1024)),
             min_image_dimension=int(os.getenv("FACE_MIN_IMAGE_DIMENSION", 64)),
@@ -46,6 +51,8 @@ class Settings:
             models_dir=os.getenv("FRAME_MODELS_DIR") or None,
             selected_model_id=os.getenv("FACE_MODEL_ID", "liveportrait-v1"),
             onnx_intra_threads=int(intra_threads) if intra_threads else None,
+            frame_diagnostics=diagnostics_value in {"1", "true", "yes", "on"},
+            frame_diagnostics_interval_ms=max(1, int(os.getenv("FRAME_FRAME_DIAGNOSTICS_INTERVAL_MS", 1_000))),
         )
 
     def resolved_model_path(self, value: str | None) -> Path | None:

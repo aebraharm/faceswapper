@@ -41,5 +41,14 @@ def create_services(settings: Settings | None = None) -> Services:
     transformer = TransformerManager(config, model_store)
     source_faces = SourceFaceStore(analyzer, aligner, transformer)
     camera = CameraSession(config.default_processing_resolution)
-    processor = FrameProcessor(analyzer, aligner, compositor, transformer, source_faces, camera)
+    processor = FrameProcessor(
+        analyzer,
+        aligner,
+        compositor,
+        transformer,
+        source_faces,
+        camera,
+        diagnostics_enabled=config.frame_diagnostics,
+        diagnostics_interval_ms=config.frame_diagnostics_interval_ms,
+    )
     return Services(config, analyzer, aligner, compositor, transformer, source_faces, camera, processor, model_store)

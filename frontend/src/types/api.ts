@@ -66,6 +66,11 @@ export interface CameraStatus {
   processing_resolution: number;
 }
 
+export interface FrameDiagnostics {
+  first_invalid: { stage: string; reason: string } | null;
+  stages: Array<Record<string, unknown>>;
+}
+
 export interface FrameStats {
   type: 'stats' | 'error';
   message?: string;
@@ -79,4 +84,6 @@ export interface FrameStats {
   transformation_active?: boolean;
   model_status?: TransformerStatus;
   device?: string;
+  /** Present only when FRAME_FRAME_DIAGNOSTICS=1 on the local backend. */
+  frame_diagnostics?: FrameDiagnostics;
 }

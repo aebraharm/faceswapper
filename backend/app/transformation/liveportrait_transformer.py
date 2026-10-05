@@ -30,6 +30,7 @@ from typing import Any, NamedTuple
 import cv2
 import numpy as np
 
+from app.camera.frame_diagnostics import record_image
 from app.transformation.base import FaceTransformer, ModelNotConfiguredError
 
 # LivePortrait's feature and motion graphs consume 256×256 crops. The fused
@@ -45,6 +46,44 @@ class SourceRepresentation(NamedTuple):
     x_s: np.ndarray
     kp_canonical: np.ndarray
     scale: np.ndarray
+
+
+def _require_finite_tensor(
+    stage: str,
+    value: Any,
+    *,
+    layout: str = "HWC",
+    channel_order: str | None = None,
+) -> np.ndarray:
+    """Reject invalid ONNX tensors before any lossy image conversion can hide them.
+
+    In particular, NumPy converts clipped ``NaN`` values to ``uint8(0)``.  That
+    turns an invalid renderer result into a plausible-looking black image instead
+    of an actionable inference failure, so every LivePortrait graph boundary is
+    checked in float form first.
+    """
+    array = np.asarray(value)
+    record_image(f"liveportrait.{stage}", array, layout=layout, channel_order=channel_order)
+    if not np.issubdtype(array.dtype, np.number):
+        raise RuntimeError(f"LivePortrait {stage} has non-numeric dtype {array.dtype}.")
+    if array.size == 0:
+        raise RuntimeError(f"LivePortrait {stage} is empty.")
+    if not np.isfinite(array).all():
+        raise RuntimeError(f"LivePortrait {stage} contains NaN or Inf values.")
+    return array
+
+
+def _require_nonblack_renderer_output(stage: str, image: np.ndarray, *, allow_blank: bool) -> None:
+    """Fail a real inference if a renderer result has become entirely black."""
+    if allow_blank or np.any(image != 0):
+        return
+    # Record the exact invalid boundary for an opt-in sampled trace before
+    # raising. This is deliberately not a visual fallback or a model swap.
+    record_image(f"liveportrait.{stage}", image, channel_order="RGB", require_nonzero=True)
+    raise RuntimeError(
+        "LivePortrait warping/SPADE renderer produced an all-zero RGB image. "
+        "The native 512x512 output is invalid before compositing."
+    )
 
 
 def _softmax_degrees(pred: np.ndarray) -> np.ndarray:
@@ -256,25 +295,39 @@ class LivePortraitOnnxTransformer(FaceTransformer):
     def _warm_up(self) -> None:
         warm_face = np.zeros((INPUT_SIZE, INPUT_SIZE, 3), dtype=np.uint8)
         representation = self.prepare_source(warm_face)
-        self.transform(representation, warm_face)
+        # A zero synthetic warm-up crop is not a real face. It verifies session
+        # execution but must not be used to reject a renderer for being black.
+        self.transform(representation, warm_face, _allow_blank_renderer_output=True)
 
     @staticmethod
     def _tensor(rgb: np.ndarray) -> np.ndarray:
+        # FRAME owns RGB/BGR conversion before this boundary.  Keep this image in
+        # RGB through resize and use NCHW only for the ONNX graph input.
+        # Camera/source image validation has already produced uint8 RGB pixels;
+        # the opt-in trace records their range and finiteness without adding a
+        # second full-frame finite scan to every inference.
+        record_image("liveportrait.model_input_rgb", rgb, channel_order="RGB")
         resized = cv2.resize(rgb, (INPUT_SIZE, INPUT_SIZE), interpolation=cv2.INTER_AREA)
+        record_image("liveportrait.model_input_rgb_256", resized, channel_order="RGB")
         chw = (resized.astype(np.float32) / 255.0).transpose(2, 0, 1)
-        return np.ascontiguousarray(chw[None, ...])
+        tensor = np.ascontiguousarray(chw[None, ...])
+        record_image("liveportrait.model_input_nchw", tensor, layout="NCHW", channel_order="RGB")
+        return tensor
 
     def _extract_feature_3d(self, rgb: np.ndarray) -> np.ndarray:
         assert self._appearance is not None
         input_name = self._appearance.get_inputs()[0].name
         output = self._appearance.run(None, {input_name: self._tensor(rgb)})[0]
-        return np.asarray(output, dtype=np.float32).copy()
+        return _require_finite_tensor("appearance_feature_3d", output, layout="NCHW").astype(np.float32, copy=True)
 
     def _extract_kp_info(self, rgb: np.ndarray) -> _KpInfo:
         assert self._motion is not None
         input_name = self._motion.get_inputs()[0].name
         outputs = self._motion.run(None, {input_name: self._tensor(rgb)})
-        by_name = {out.name.lower(): value for out, value in zip(self._motion.get_outputs(), outputs)}
+        output_names = [out.name.lower() for out in self._motion.get_outputs()]
+        for name, value in zip(output_names, outputs):
+            _require_finite_tensor(f"motion.{name}", value)
+        by_name = {name: value for name, value in zip(output_names, outputs)}
         try:
             pitch, yaw, roll, t, exp, scale, kp = (
                 by_name["pitch"],
@@ -289,7 +342,7 @@ class LivePortraitOnnxTransformer(FaceTransformer):
             # Positional fallback matching FasterLivePortrait's onnxruntime output order.
             pitch, yaw, roll, t, exp, scale, kp = outputs
         bs = np.asarray(kp).shape[0]
-        return _KpInfo(
+        info = _KpInfo(
             pitch=_softmax_degrees(np.asarray(pitch))[:, None],
             yaw=_softmax_degrees(np.asarray(yaw))[:, None],
             roll=_softmax_degrees(np.asarray(roll))[:, None],
@@ -298,31 +351,54 @@ class LivePortraitOnnxTransformer(FaceTransformer):
             scale=np.asarray(scale, dtype=np.float32).reshape(bs, -1)[:, :1],
             kp=np.asarray(kp, dtype=np.float32).reshape(bs, NUM_KEYPOINTS, 3),
         )
+        for name, value in info._asdict().items():
+            _require_finite_tensor(f"motion.normalized_{name}", value)
+        return info
 
     def prepare_source(self, source_face_rgb: np.ndarray) -> SourceRepresentation:
         if self._appearance is None or self._motion is None:
             raise RuntimeError("The LivePortrait model is not loaded.")
+        record_image("liveportrait.source_face_rgb", source_face_rgb, channel_order="RGB")
         feature_3d = self._extract_feature_3d(source_face_rgb)
         info = self._extract_kp_info(source_face_rgb)
-        x_s = _transform_keypoints(info.kp, info.pitch, info.yaw, info.roll, info.exp, info.scale, info.t)
+        x_s = _require_finite_tensor(
+            "source_keypoints", _transform_keypoints(info.kp, info.pitch, info.yaw, info.roll, info.exp, info.scale, info.t)
+        )
         # Own, compact arrays only: no source pixels are retained.
         return SourceRepresentation(
             feature_3d=feature_3d.copy(), x_s=x_s.copy(), kp_canonical=info.kp.copy(), scale=info.scale.copy()
         )
 
-    def transform(self, source_representation: Any, target_face_rgb: np.ndarray) -> np.ndarray:
+    def transform(
+        self,
+        source_representation: Any,
+        target_face_rgb: np.ndarray,
+        *,
+        _allow_blank_renderer_output: bool = False,
+    ) -> np.ndarray:
         if self._warp is None or self._motion is None:
             raise RuntimeError("The LivePortrait model is not loaded.")
         representation: SourceRepresentation = source_representation
+        # These cached arrays were checked when prepare_source() built them. The
+        # trace can still report them for a sampled frame without rescanning the
+        # 2M-value appearance feature volume on every live inference.
+        record_image("liveportrait.source_representation.feature_3d", representation.feature_3d, layout="NCHW")
+        record_image("liveportrait.source_representation.x_s", representation.x_s)
+        record_image("liveportrait.source_representation.kp_canonical", representation.kp_canonical)
+        record_image("liveportrait.source_representation.scale", representation.scale)
+        record_image("liveportrait.target_face_rgb", target_face_rgb, channel_order="RGB")
         d_info = self._extract_kp_info(target_face_rgb)
-        x_d = _transform_keypoints(
-            representation.kp_canonical,
-            d_info.pitch,
-            d_info.yaw,
-            d_info.roll,
-            d_info.exp,
-            representation.scale,
-            d_info.t,
+        x_d = _require_finite_tensor(
+            "driving_keypoints",
+            _transform_keypoints(
+                representation.kp_canonical,
+                d_info.pitch,
+                d_info.yaw,
+                d_info.roll,
+                d_info.exp,
+                representation.scale,
+                d_info.t,
+            ),
         )
         inputs_by_role = {
             "feature": representation.feature_3d,
@@ -335,7 +411,12 @@ class LivePortraitOnnxTransformer(FaceTransformer):
         for name, role in zip(order, role_sequence):
             feed[name] = inputs_by_role[role]
         output = self._warp.run(None, feed)[0]
-        image = np.asarray(output, dtype=np.float32)
+        # This is the ONNX warping_spade tensor before transpose, clipping, or
+        # uint8 conversion. It is the key boundary for diagnosing black output.
+        raw_output = _require_finite_tensor(
+            "warping_spade.native_output_nchw", output, layout="NCHW", channel_order="RGB"
+        )
+        image = np.asarray(raw_output, dtype=np.float32)
         if image.ndim == 4:
             image = image[0]
         if image.ndim == 3 and image.shape[0] in (1, 3, 4):
@@ -350,9 +431,19 @@ class LivePortraitOnnxTransformer(FaceTransformer):
                 "LivePortrait output did not match the warping/SPADE graph metadata: "
                 f"expected {self._warp_output_size[0]}x{self._warp_output_size[1]}x3; got {image.shape}."
             )
+        # raw_output was checked while still NCHW. The transpose preserves those
+        # finite values, so recording this view need not scan the 512px tensor a
+        # second time in the production path.
+        record_image("liveportrait.warping_spade.native_output_rgb", image, channel_order="RGB", require_nonzero=True)
         if image.max() <= 1.5:
             image = image * 255.0
-        return np.clip(image, 0, 255).astype(np.uint8)
+        record_image("liveportrait.warping_spade.scaled_output_rgb", image, channel_order="RGB", require_nonzero=True)
+        converted = np.clip(image, 0, 255).astype(np.uint8)
+        record_image("liveportrait.warping_spade.uint8_output_rgb", converted, channel_order="RGB", require_nonzero=True)
+        _require_nonblack_renderer_output(
+            "warping_spade.uint8_output_rgb", converted, allow_blank=_allow_blank_renderer_output
+        )
+        return converted
 
     def unload_model(self) -> None:
         self._appearance = None

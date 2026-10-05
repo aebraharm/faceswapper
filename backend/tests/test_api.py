@@ -157,16 +157,25 @@ def test_camera_websocket_returns_binary_preview_and_performance_stats():
 
     with make_client() as client:
         client.post("/camera/start", json={})
-        ok, frame = cv2.imencode(".jpg", np.zeros((120, 160, 3), dtype=np.uint8))
+        # Use channel-distinct non-black pixels so this checks the full WebSocket
+        # JPEG payload, not merely that it starts with a JPEG marker.
+        frame_bgr = np.full((120, 160, 3), (25, 90, 210), dtype=np.uint8)
+        ok, frame = cv2.imencode(".jpg", frame_bgr)
         assert ok
         with client.websocket_connect("/ws/stream") as websocket:
             websocket.send_bytes(frame.tobytes())
             stats = websocket.receive_json()
             processed = websocket.receive_bytes()
+            decoded = cv2.imdecode(np.frombuffer(processed, np.uint8), cv2.IMREAD_COLOR)
             assert stats["type"] == "stats"
             assert stats["camera_resolution"] == "160 × 120"
             assert stats["transformation_active"] is False
             assert processed[:2] == b"\xff\xd8"
+            assert decoded is not None
+            assert decoded.shape == (120, 160, 3)
+            assert np.any(decoded != 0)
+            # Output remains BGR JPEG data that a browser image decoder can draw.
+            assert decoded[60, 80].mean() > 20
         client.post("/camera/stop")
 
 

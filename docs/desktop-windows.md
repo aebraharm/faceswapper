@@ -117,6 +117,7 @@ The main process resolves the executable from `process.resourcesPath`, not the c
 - **Source-photo errors:** the local preview appears immediately after a supported file is selected; decode, no-face, and request/runtime failures are announced beside the source image. The desktop API normalizes empty/legacy Windows MIME metadata from the filename extension, while FastAPI still validates the actual image bytes.
 - **Camera errors:** remain visible in the existing inline camera panel; Electron authorizes only the camera request initiated by the Start Camera UI action.
 - **Backend:** development logs appear in the Electron process terminal. The packaged sidecar suppresses access logs to avoid logging uploaded image/video requests.
+- **Black/invalid processed-frame tracing:** before launching FRAME, set `FRAME_FRAME_DIAGNOSTICS=1` (and optionally `FRAME_FRAME_DIAGNOSTICS_INTERVAL_MS=1000`). The local backend samples at most one frame per interval and emits one `FRAME frame diagnostics` record; the matching WebSocket stats message and renderer console debug entry include shape, dtype, finite/NaN/Inf, min/max, zero/nonzero, RGB/BGR channel, alpha, JPEG marker/decode, and bitmap dimensions. `first_invalid` names the first failed boundary. The normal path has no per-frame trace or extra JPEG round-trip. Unset these variables after collecting a trace.
 
 ## Windows desktop validation checklist
 

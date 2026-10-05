@@ -84,6 +84,42 @@ def test_transform_preserves_liveportrait_native_512_render_output(tmp_path: Pat
         output = model.transform(model.prepare_source(source), source)
         assert output.shape == (512, 512, 3)
         assert output.dtype == np.uint8
+        assert np.isfinite(output).all()
+        # The native warping/SPADE boundary must contain image data before the
+        # compositor downscales it to FRAME's 256px alignment coordinates.
+        assert np.any(output != 0)
+    finally:
+        model.unload_model()
+
+
+def test_transform_rejects_nonfinite_native_warping_spade_output(tiny_bundle, monkeypatch):
+    model = _model(tiny_bundle)
+    model.load_model()
+    try:
+        representation = model.prepare_source(np.full((256, 256, 3), 90, dtype=np.uint8))
+
+        def nan_output(*args, **kwargs):
+            return [np.full((1, 3, 256, 256), np.nan, dtype=np.float32)]
+
+        monkeypatch.setattr(model._warp, "run", nan_output)
+        with pytest.raises(RuntimeError, match="warping_spade.native_output_nchw contains NaN or Inf"):
+            model.transform(representation, np.full((256, 256, 3), 120, dtype=np.uint8))
+    finally:
+        model.unload_model()
+
+
+def test_transform_rejects_all_black_native_warping_spade_output(tiny_bundle, monkeypatch):
+    model = _model(tiny_bundle)
+    model.load_model()
+    try:
+        representation = model.prepare_source(np.full((256, 256, 3), 90, dtype=np.uint8))
+
+        def black_output(*args, **kwargs):
+            return [np.zeros((1, 3, 256, 256), dtype=np.float32)]
+
+        monkeypatch.setattr(model._warp, "run", black_output)
+        with pytest.raises(RuntimeError, match="renderer produced an all-zero RGB image"):
+            model.transform(representation, np.full((256, 256, 3), 120, dtype=np.uint8))
     finally:
         model.unload_model()
 
