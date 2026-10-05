@@ -1,3 +1,6 @@
 -r requirements.txt
 pytest>=8,<9
 httpx>=0.27,<1
+# Only used to synthesize tiny fake ONNX graphs for model-adapter tests -- never
+# shipped in the packaged app and never used to touch real model weights.
+onnx>=1.16,<2

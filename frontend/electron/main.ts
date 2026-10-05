@@ -99,6 +99,7 @@ function spawnBackend(port: number, sessionToken: string): ChildProcess {
     sessionToken,
     baseEnvironment: process.env,
     pythonExecutable: process.env.FRAME_PYTHON,
+    modelsDirectory: path.join(userDataDirectory, 'models'),
   });
   const child = spawn(command.command, command.args, {
     cwd: command.cwd,

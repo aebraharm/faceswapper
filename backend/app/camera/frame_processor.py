@@ -32,6 +32,7 @@ class FrameProcessor:
         self.source_faces = source_faces
         self.camera = camera
         self._tracker = TargetFaceTracker()
+        self._last_transformed_rgb: np.ndarray | None = None
 
     def process_jpeg(self, payload: bytes) -> tuple[bytes, dict[str, Any]]:
         started = time.perf_counter()
@@ -66,14 +67,25 @@ class FrameProcessor:
             and source_status["model_ready"]
             and target is not None
         )
+        skipped_inference = False
         if transform_active and target is not None:
             representation = self.source_faces.representation()
             if representation is not None:
-                aligned = self.aligner.align(work, target, output_size=256)
-                transformed = self.transformer.transform(representation, aligned.image)
-                output = self.compositor.blend(work, transformed, aligned, settings["intensity"])
+                run_inference = self.camera.should_run_inference()
+                if not run_inference and self._last_transformed_rgb is not None and self._last_transformed_rgb.shape == work.shape:
+                    # Performance mode: reuse the last composited frame instead of
+                    # falling further behind on a slow (e.g. 4 GB RAM) machine.
+                    output = self._last_transformed_rgb
+                    skipped_inference = True
+                else:
+                    aligned = self.aligner.align(work, target, output_size=256)
+                    transformed = self.transformer.transform(representation, aligned.image)
+                    output = self.compositor.blend(work, transformed, aligned, settings["intensity"])
+                    self._last_transformed_rgb = output
             else:
                 transform_active = False
+        else:
+            self._last_transformed_rgb = None
 
         # Highlight all detected faces; only the selected target is marked in green.
         annotated = output.copy()
@@ -99,6 +111,8 @@ class FrameProcessor:
             "faces": [face.as_dict() for face in observations],
             "selected_target": selected_index,
             "transformation_active": transform_active,
+            "performance_mode": settings.get("performance_mode", "auto"),
+            "skipped_inference": skipped_inference,
             "model_status": model_status,
             "device": model_status["device"],
         }

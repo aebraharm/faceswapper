@@ -1,4 +1,4 @@
-import type { CameraStatus, SourceFaceStatus, TransformerStatus } from '../types/api';
+import type { CameraStatus, ModelCatalogEntry, ModelCatalogResponse, SourceFaceStatus, TransformerStatus } from '../types/api';
 import { getSourceImageContentType } from './sourceImage';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -52,6 +52,14 @@ export const api = {
   stopCamera: () => request<CameraStatus>('/camera/stop', { method: 'POST' }),
   cameraStatus: () => request<CameraStatus>('/camera/status'),
   selectTarget: (face_index: number | null) => request<CameraStatus>('/camera/target', json({ face_index })),
-  cameraSettings: (settings: { transform_enabled?: boolean; intensity?: number; processing_resolution?: number }) =>
-    request<Record<string, unknown>>('/camera/settings', json(settings)),
+  cameraSettings: (settings: {
+    transform_enabled?: boolean;
+    intensity?: number;
+    processing_resolution?: number;
+    performance_mode?: 'auto' | 'quality' | 'performance';
+  }) => request<Record<string, unknown>>('/camera/settings', json(settings)),
+  modelCatalog: () => request<ModelCatalogResponse>('/models/catalog'),
+  modelStatus: (modelId: string) => request<ModelCatalogEntry>(`/models/${modelId}/status`),
+  installModel: (modelId: string) => request<ModelCatalogEntry>(`/models/${modelId}/install`, { method: 'POST' }),
+  removeModel: (modelId: string) => request<ModelCatalogEntry>(`/models/${modelId}`, { method: 'DELETE' }),
 };

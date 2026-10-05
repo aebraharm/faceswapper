@@ -21,6 +21,7 @@ class CameraSettingsRequest(BaseModel):
     transform_enabled: bool | None = None
     intensity: float | None = Field(default=None, ge=0.0, le=1.0)
     processing_resolution: Literal[320, 480, 640, 720] | None = None
+    performance_mode: Literal["auto", "quality", "performance"] | None = None
 
 
 class TransformerLoadRequest(BaseModel):

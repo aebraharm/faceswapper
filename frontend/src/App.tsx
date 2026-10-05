@@ -28,7 +28,14 @@ import { api } from './services/api';
 import { getSourceImageContentType } from './services/sourceImage';
 import { getProcessedVideoStream } from './services/output';
 import type { DesktopPreferences } from './types/desktop';
-import type { CameraStatus, FaceBox, FrameStats, SourceFaceStatus, TransformerStatus } from './types/api';
+import type {
+  CameraStatus,
+  FaceBox,
+  FrameStats,
+  ModelCatalogEntry,
+  SourceFaceStatus,
+  TransformerStatus,
+} from './types/api';
 
 const emptySource: SourceFaceStatus = {
   uploaded: false,
@@ -103,6 +110,9 @@ function App() {
   const [targetFaces, setTargetFaces] = useState<FaceBox[]>([]);
   const [selectedTarget, setSelectedTarget] = useState<number | null>(null);
   const [outputEnabled, setOutputEnabled] = useState(false);
+  const [catalog, setCatalog] = useState<ModelCatalogEntry[]>([]);
+  const [installingId, setInstallingId] = useState<string | null>(null);
+  const [performanceMode, setPerformanceMode] = useState<'auto' | 'quality' | 'performance'>('auto');
 
   const showNotice = (message: string, tone: 'success' | 'error' = 'success') => {
     setNoticeTone(tone);
@@ -184,6 +194,35 @@ function App() {
     };
   }, [refreshDevices]);
 
+  // Installable-model catalog is fetched separately from the core health/source/model
+  // bootstrap above so a slow or unmocked catalog call never blocks (or is required by)
+  // the rest of the UI.
+  useEffect(() => {
+    let mounted = true;
+    let pollTimer: number | null = null;
+
+    const loadCatalog = () => {
+      api
+        .modelCatalog()
+        .then((response) => {
+          if (!mounted) return;
+          setCatalog(response.models);
+          const stillBusy = response.models.some((entry) => entry.downloading);
+          pollTimer = window.setTimeout(loadCatalog, stillBusy ? 800 : 15000);
+        })
+        .catch(() => {
+          // The catalog is informational only; the rest of the app keeps working
+          // (e.g. a bring-your-own ONNX bundle) if this call fails.
+        });
+    };
+    loadCatalog();
+
+    return () => {
+      mounted = false;
+      if (pollTimer !== null) window.clearTimeout(pollTimer);
+    };
+  }, []);
+
   useEffect(() => {
     if (!preferencesLoaded || !window.frameDesktop) return;
     const timer = window.setTimeout(() => {
@@ -195,12 +234,12 @@ function App() {
   useEffect(() => {
     if (!cameraLive) return;
     const timer = window.setTimeout(() => {
-      void api.cameraSettings({ intensity, processing_resolution: resolution }).catch((error) => {
+      void api.cameraSettings({ intensity, processing_resolution: resolution, performance_mode: performanceMode }).catch((error) => {
         showNotice(errorMessage(error), 'error');
       });
     }, 120);
     return () => window.clearTimeout(timer);
-  }, [intensity, resolution, cameraLive]);
+  }, [intensity, resolution, performanceMode, cameraLive]);
 
   const handleFrameMessage = useCallback(async (event: MessageEvent) => {
     if (typeof event.data === 'string') {
@@ -306,7 +345,7 @@ function App() {
         await videoRef.current.play();
       }
       await refreshDevices();
-      await api.cameraSettings({ transform_enabled: false, intensity, processing_resolution: resolution });
+      await api.cameraSettings({ transform_enabled: false, intensity, processing_resolution: resolution, performance_mode: performanceMode });
       await api.startCamera(selectedDevice || null);
 
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -514,6 +553,39 @@ function App() {
     } catch (error) {
       showNotice(errorMessage(error), 'error');
       setModel(await api.transformerStatus().catch(() => model));
+    }
+  };
+
+  const installCatalogModel = async (modelId: string) => {
+    setInstallingId(modelId);
+    try {
+      const status = await api.installModel(modelId);
+      setCatalog((current) => current.map((entry) => (entry.id === modelId ? status : entry)));
+      showNotice(status.error ? errorMessage(new Error(status.error)) : `Downloading ${status.display_name}…`, status.error ? 'error' : 'success');
+    } catch (error) {
+      showNotice(errorMessage(error), 'error');
+    } finally {
+      setInstallingId(null);
+    }
+  };
+
+  const removeCatalogModel = async (modelId: string) => {
+    try {
+      const status = await api.removeModel(modelId);
+      setCatalog((current) => current.map((entry) => (entry.id === modelId ? status : entry)));
+      showNotice(`${status.display_name} removed from disk.`);
+    } catch (error) {
+      showNotice(errorMessage(error), 'error');
+    }
+  };
+
+  const changePerformanceMode = async (mode: 'auto' | 'quality' | 'performance') => {
+    setPerformanceMode(mode);
+    if (!cameraLive) return;
+    try {
+      await api.cameraSettings({ performance_mode: mode });
+    } catch (error) {
+      showNotice(errorMessage(error), 'error');
     }
   };
 
@@ -803,6 +875,55 @@ function App() {
               {model.loaded ? <><ArrowDownToLine size={15} className="rotate-180" /> Unload model</> : <><Zap size={15} /> Load configured model</>}
             </button>
             {!model.loaded && <a className="model-doc-link" href="/models/README.md" onClick={(event) => { event.preventDefault(); showNotice('See models/README.md in the repository for the model ABI, installation steps and licensing checklist.'); }}><CircleHelp size={13} /> Model setup & licensing <span>↗</span></a>}
+
+            {catalog.length > 0 && (
+              <div className="model-catalog">
+                {catalog.map((entry) => {
+                  const mb = (bytes: number) => `${Math.max(1, Math.round(bytes / 1024 / 1024))} MB`;
+                  const busy = entry.downloading || installingId === entry.id;
+                  return (
+                    <div key={entry.id} className="model-catalog-entry">
+                      <div className="model-catalog-row">
+                        <div>
+                          <strong>{entry.display_name}</strong>
+                          <p className="model-catalog-summary">{entry.summary}</p>
+                          <span className="model-catalog-meta">
+                            {entry.license_name} license · {mb(entry.approx_total_bytes)}
+                          </span>
+                        </div>
+                        {entry.installed ? (
+                          <button
+                            type="button"
+                            className="button button--outline model-catalog-action"
+                            onClick={() => void removeCatalogModel(entry.id)}
+                            disabled={model.loaded && model.model_id === entry.id}
+                            title={model.loaded && model.model_id === entry.id ? 'Unload the model before removing it.' : undefined}
+                          >
+                            <Trash2 size={13} /> Remove
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            className="button button--dark model-catalog-action"
+                            onClick={() => void installCatalogModel(entry.id)}
+                            disabled={busy}
+                          >
+                            {busy ? <LoaderCircle size={13} className="spin" /> : <ArrowDownToLine size={13} />}
+                            {entry.downloading ? `${Math.round(entry.progress * 100)}%` : 'Install'}
+                          </button>
+                        )}
+                      </div>
+                      {entry.downloading && (
+                        <div className="model-catalog-progress" role="progressbar" aria-valuenow={Math.round(entry.progress * 100)} aria-valuemin={0} aria-valuemax={100}>
+                          <div className="model-catalog-progress-fill" style={{ width: `${Math.round(entry.progress * 100)}%` }} />
+                        </div>
+                      )}
+                      {entry.error && <p className="model-catalog-error">{entry.error}</p>}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           <div className="panel output-panel">
@@ -816,7 +937,25 @@ function App() {
         </section>
 
         <section className="performance-section" aria-label="Live performance">
-          <div className="performance-header"><div><span className="eyebrow-line" /><span className="step-label-text">LIVE PERFORMANCE</span></div><span className="performance-subtitle">Updates while camera is streaming</span></div>
+          <div className="performance-header">
+            <div><span className="eyebrow-line" /><span className="step-label-text">LIVE PERFORMANCE</span></div>
+            <span className="performance-subtitle">Updates while camera is streaming</span>
+            <div className="performance-mode-control">
+              <label htmlFor="performance-mode-select">Mode</label>
+              <div className="provider-select-wrap">
+                <select
+                  id="performance-mode-select"
+                  value={performanceMode}
+                  onChange={(event) => void changePerformanceMode(event.target.value as 'auto' | 'quality' | 'performance')}
+                >
+                  <option value="auto">Auto · degrade if slow</option>
+                  <option value="quality">Quality · every frame</option>
+                  <option value="performance">Performance · skip frames</option>
+                </select>
+                <ChevronDown size={12} />
+              </div>
+            </div>
+          </div>
           <div className="metrics-grid">
             <MetricCard label="PROCESSING FPS" value={cameraLive ? fps.toFixed(1) : '—'} note={cameraLive ? 'End-to-end stream' : 'Camera is off'} icon={Zap} accent />
             <MetricCard label="FRAME LATENCY" value={cameraLive ? `${latency.toFixed(0)} ms` : '—'} note="Detection + processing" icon={Aperture} />
