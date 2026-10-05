@@ -75,7 +75,9 @@ def test_frame_processor_applies_transform_and_blend_only_when_prerequisites_are
         def status(self):
             return {"loaded": True, "name": "mock", "device": "CPU", "provider": "CPUExecutionProvider"}
         def transform(self, source, aligned_target):
-            return np.full((256, 256, 3), (230, 75, 60), dtype=np.uint8)
+            # Catalog LivePortrait renders 512×512 even though FRAME's aligned
+            # model inputs and inverse-compositing coordinates are 256×256.
+            return np.full((512, 512, 3), (230, 75, 60), dtype=np.uint8)
 
     class ReadySource:
         def status(self):

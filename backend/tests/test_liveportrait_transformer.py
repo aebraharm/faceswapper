@@ -73,6 +73,21 @@ def test_transform_output_is_a_valid_rgb_face_crop_and_tracks_the_target(tiny_bu
         model.unload_model()
 
 
+def test_transform_preserves_liveportrait_native_512_render_output(tmp_path: Path):
+    bundle = build_tiny_liveportrait_bundle(tmp_path, warping_output_size=512)
+    model = _model(bundle)
+    model.load_model()
+    try:
+        assert model._warp.get_outputs()[0].shape == [1, 3, 512, 512]
+        assert model._warp_output_size == (512, 512)
+        source = np.full((256, 256, 3), 90, dtype=np.uint8)
+        output = model.transform(model.prepare_source(source), source)
+        assert output.shape == (512, 512, 3)
+        assert output.dtype == np.uint8
+    finally:
+        model.unload_model()
+
+
 def test_prepare_source_is_cached_and_not_recomputed_per_frame(tiny_bundle, monkeypatch):
     model = _model(tiny_bundle)
     model.load_model()

@@ -32,6 +32,8 @@ import numpy as np
 
 from app.transformation.base import FaceTransformer, ModelNotConfiguredError
 
+# LivePortrait's feature and motion graphs consume 256×256 crops. The fused
+# warping/SPADE graph deliberately renders a higher-resolution 512×512 crop.
 INPUT_SIZE = 256
 NUM_KEYPOINTS = 21
 
@@ -141,6 +143,7 @@ class LivePortraitOnnxTransformer(FaceTransformer):
         self._motion = None
         self._warp = None
         self._warp_input_order: list[str] | None = None
+        self._warp_output_size: tuple[int, int] | None = None
 
     def load_model(self) -> None:
         for path in (self.appearance_feature_extractor_path, self.motion_extractor_path, self.warping_spade_path):
@@ -179,6 +182,7 @@ class LivePortraitOnnxTransformer(FaceTransformer):
                 )
                 self._warp = ort.InferenceSession(str(self.warping_spade_path), sess_options=options, providers=[candidate])
                 self._warp_input_order = self._resolve_warp_input_order()
+                self._warp_output_size = self._resolve_warp_output_size()
                 self.device = "CUDA" if "CUDA" in candidate else "CPU"
                 self._warm_up()
                 return
@@ -220,12 +224,39 @@ class LivePortraitOnnxTransformer(FaceTransformer):
         # Fall back to the documented FasterLivePortrait ONNX export order.
         return names
 
+    def _resolve_warp_output_size(self) -> tuple[int, int] | None:
+        """Validate the fused renderer's single RGB output without assuming 256×256.
+
+        The catalog's FasterLivePortrait export consumes 256×256 model inputs but
+        its SPADE decoder renders a 512×512 RGB image. Keep this check tied to
+        ONNX metadata so an incompatible graph cannot silently be treated as the
+        catalog renderer; a dynamic spatial shape is verified after inference.
+        """
+        assert self._warp is not None
+        outputs = self._warp.get_outputs()
+        if len(outputs) != 1:
+            raise ModelNotConfiguredError(
+                f"The warping/SPADE graph must expose one rendered RGB output; found {len(outputs)}."
+            )
+        output = outputs[0]
+        shape = output.shape
+        if len(shape) != 4 or shape[1] != 3:
+            raise ModelNotConfiguredError(
+                f"The warping/SPADE output '{output.name}' must be NCHW with three RGB channels; got {shape}."
+            )
+        height, width = shape[2:]
+        if isinstance(height, int) and isinstance(width, int):
+            if height <= 0 or width <= 0 or height != width:
+                raise ModelNotConfiguredError(
+                    f"The warping/SPADE output '{output.name}' must be a non-empty square RGB image; got {shape}."
+                )
+            return height, width
+        return None
+
     def _warm_up(self) -> None:
         warm_face = np.zeros((INPUT_SIZE, INPUT_SIZE, 3), dtype=np.uint8)
         representation = self.prepare_source(warm_face)
-        output = self.transform(representation, warm_face)
-        if output.shape != (INPUT_SIZE, INPUT_SIZE, 3):
-            raise ModelNotConfiguredError(f"Unexpected LivePortrait output shape during warm-up: {output.shape}")
+        self.transform(representation, warm_face)
 
     @staticmethod
     def _tensor(rgb: np.ndarray) -> np.ndarray:
@@ -309,8 +340,16 @@ class LivePortraitOnnxTransformer(FaceTransformer):
             image = image[0]
         if image.ndim == 3 and image.shape[0] in (1, 3, 4):
             image = image.transpose(1, 2, 0)
-        if image.shape != (INPUT_SIZE, INPUT_SIZE, 3):
-            raise RuntimeError(f"LivePortrait output must be 256x256x3; got {image.shape}.")
+        if image.ndim != 3 or image.shape[2] != 3:
+            raise RuntimeError(f"LivePortrait output must be an RGB image; got {image.shape}.")
+        height, width = image.shape[:2]
+        if height <= 0 or width <= 0 or height != width:
+            raise RuntimeError(f"LivePortrait output must be a non-empty square RGB image; got {image.shape}.")
+        if self._warp_output_size is not None and (height, width) != self._warp_output_size:
+            raise RuntimeError(
+                "LivePortrait output did not match the warping/SPADE graph metadata: "
+                f"expected {self._warp_output_size[0]}x{self._warp_output_size[1]}x3; got {image.shape}."
+            )
         if image.max() <= 1.5:
             image = image * 255.0
         return np.clip(image, 0, 255).astype(np.uint8)
@@ -320,4 +359,5 @@ class LivePortraitOnnxTransformer(FaceTransformer):
         self._motion = None
         self._warp = None
         self._warp_input_order = None
+        self._warp_output_size = None
         self.device = "not loaded"

@@ -22,7 +22,17 @@ class FaceCompositor:
             raise ValueError("Transformation intensity must be between 0 and 1.")
         height, width = frame_rgb.shape[:2]
         size = aligned.output_size
-        transformed = cv2.resize(transformed_rgb, (size, size), interpolation=cv2.INTER_LINEAR)
+        # The LivePortrait renderer natively emits a 512×512 crop after taking
+        # 256×256 feature/motion inputs. The inverse alignment matrix below is in
+        # FRAME's 256×256 canonical crop coordinates, so resample only here at the
+        # compositing boundary. INTER_AREA preserves the renderer's image semantics
+        # when reducing its native high-resolution output.
+        source_height, source_width = transformed_rgb.shape[:2]
+        if (source_width, source_height) == (size, size):
+            transformed = transformed_rgb
+        else:
+            interpolation = cv2.INTER_AREA if source_width >= size and source_height >= size else cv2.INTER_CUBIC
+            transformed = cv2.resize(transformed_rgb, (size, size), interpolation=interpolation)
         mask = np.zeros((size, size), dtype=np.float32)
         center = (size // 2, int(size * 0.52))
         axes = (int(size * 0.43), int(size * 0.48))

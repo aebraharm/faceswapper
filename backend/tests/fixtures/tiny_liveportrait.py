@@ -105,11 +105,16 @@ def build_motion_extractor(path: Path, num_kp: int = 21) -> None:
     _save("motion_extractor", [img], outputs, all_nodes, all_inits, path)
 
 
-def build_warping_spade(path: Path, feature_shape=(1, 32, 16, 64, 64), num_kp: int = 21) -> None:
+def build_warping_spade(
+    path: Path,
+    feature_shape=(1, 32, 16, 64, 64),
+    num_kp: int = 21,
+    output_size: int = 256,
+) -> None:
     feature = helper.make_tensor_value_info("feature_3d", TensorProto.FLOAT, list(feature_shape))
     kp_source = helper.make_tensor_value_info("kp_source", TensorProto.FLOAT, [1, num_kp, 3])
     kp_driving = helper.make_tensor_value_info("kp_driving", TensorProto.FLOAT, [1, num_kp, 3])
-    out = helper.make_tensor_value_info("out", TensorProto.FLOAT, [1, 3, 256, 256])
+    out = helper.make_tensor_value_info("out", TensorProto.FLOAT, [1, 3, output_size, output_size])
 
     nodes = [
         helper.make_node("ReduceMean", ["feature_3d"], ["f_mean"], keepdims=0),
@@ -119,11 +124,11 @@ def build_warping_spade(path: Path, feature_shape=(1, 32, 16, 64, 64), num_kp: i
         helper.make_node("Add", ["fs", "d_mean"], ["fsd"]),
         helper.make_node("Sigmoid", ["fsd"], ["sig"]),
     ]
-    expand_nodes, expand_inits = _expand_scalar("sig", [1, 3, 256, 256], "out", "w")
+    expand_nodes, expand_inits = _expand_scalar("sig", [1, 3, output_size, output_size], "out", "w")
     _save("warping_spade", [feature, kp_source, kp_driving], [out], nodes + expand_nodes, expand_inits, path)
 
 
-def build_tiny_liveportrait_bundle(directory: Path) -> dict[str, Path]:
+def build_tiny_liveportrait_bundle(directory: Path, warping_output_size: int = 256) -> dict[str, Path]:
     directory.mkdir(parents=True, exist_ok=True)
     paths = {
         "appearance_feature_extractor.onnx": directory / "appearance_feature_extractor.onnx",
@@ -132,5 +137,5 @@ def build_tiny_liveportrait_bundle(directory: Path) -> dict[str, Path]:
     }
     build_appearance_feature_extractor(paths["appearance_feature_extractor.onnx"])
     build_motion_extractor(paths["motion_extractor.onnx"])
-    build_warping_spade(paths["warping_spade.onnx"])
+    build_warping_spade(paths["warping_spade.onnx"], output_size=warping_output_size)
     return paths
