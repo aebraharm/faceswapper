@@ -150,6 +150,9 @@ def test_real_liveportrait_512_pipeline_preserves_a_nonblack_decodable_camera_fr
         trace = stats["frame_diagnostics"]
         assert trace["first_invalid"] is None
         stages = {entry["stage"]: entry for entry in trace["stages"]}
+        invocation = stages["liveportrait.warping_spade.run_start"]
+        assert invocation["metadata_output_size"] == [512, 512]
+        assert [item["role"] for item in invocation["inputs"]] == ["feature", "source", "driving"]
         native = stages["liveportrait.warping_spade.native_output_nchw"]
         assert native["dimensions"] == {"batch": 1, "channels": 3, "height": 512, "width": 512}
         assert native["finite"] is True

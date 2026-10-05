@@ -30,7 +30,7 @@ from typing import Any, NamedTuple
 import cv2
 import numpy as np
 
-from app.camera.frame_diagnostics import record_image
+from app.camera.frame_diagnostics import record_event, record_image
 from app.transformation.base import FaceTransformer, ModelNotConfiguredError
 
 # LivePortrait's feature and motion graphs consume 256×256 crops. The fused
@@ -410,6 +410,26 @@ class LivePortraitOnnxTransformer(FaceTransformer):
         role_sequence = ["feature", "source", "driving"]
         for name, role in zip(order, role_sequence):
             feed[name] = inputs_by_role[role]
+        # This event sits immediately before the only warping_spade invocation.
+        # If the raw-output stage is absent after this event, the graph run itself
+        # raised; FrameProcessor then records that exception and sends a WebSocket
+        # error instead of fabricating a black preview.
+        record_event(
+            "liveportrait.warping_spade.run_start",
+            {
+                "input_order": order,
+                "inputs": [
+                    {
+                        "name": name,
+                        "role": role,
+                        "shape": [int(value) for value in feed[name].shape],
+                        "dtype": str(feed[name].dtype),
+                    }
+                    for name, role in zip(order, role_sequence)
+                ],
+                "metadata_output_size": list(self._warp_output_size) if self._warp_output_size is not None else None,
+            },
+        )
         output = self._warp.run(None, feed)[0]
         # This is the ONNX warping_spade tensor before transpose, clipping, or
         # uint8 conversion. It is the key boundary for diagnosing black output.
