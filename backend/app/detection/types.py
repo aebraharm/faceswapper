@@ -21,6 +21,10 @@ class FaceObservation:
     landmarks5: np.ndarray | None = None
     confidence: float | None = None
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.bbox, BoundingBox):
+            object.__setattr__(self, "bbox", BoundingBox(*(int(value) for value in self.bbox)))
+
     def as_dict(self) -> dict[str, int | float | None]:
         return {
             "x": int(self.bbox.x),

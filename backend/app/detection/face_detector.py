@@ -6,7 +6,7 @@ from typing import Protocol
 import cv2
 import numpy as np
 
-from .types import FaceObservation
+from .types import BoundingBox, FaceObservation
 
 
 class FaceDetector(Protocol):
@@ -32,4 +32,4 @@ class OpenCVFaceDetector:
             minNeighbors=self._min_neighbors,
             minSize=(36, 36),
         )
-        return [FaceObservation(tuple(int(v) for v in box)) for box in boxes]
+        return [FaceObservation(BoundingBox(*(int(v) for v in box))) for box in boxes]

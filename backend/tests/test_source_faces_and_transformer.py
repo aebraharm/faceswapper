@@ -4,6 +4,8 @@ import numpy as np
 import pytest
 
 from app.alignment.face_aligner import FaceAligner
+from app.detection.analyzer import FaceAnalyzer
+from app.detection.face_detector import OpenCVFaceDetector
 from app.detection.types import BoundingBox, FaceObservation
 from app.source_faces import SourceFaceStore
 from app.transformation.base import FaceTransformer, ModelNotConfiguredError
@@ -55,6 +57,38 @@ class NoOpModel(FaceTransformer):
     def prepare_source(self, source_face_rgb): return np.ones((1, 8), dtype=np.float32)
     def transform(self, source_representation, target_face_rgb): return target_face_rgb
     def unload_model(self): pass
+
+
+class FallbackCascade:
+    def detectMultiScale(self, image, **kwargs):
+        return np.asarray([[20, 20, 100, 120]], dtype=np.int32)
+
+
+class UnavailableLandmarks:
+    available = False
+
+    def analyze(self, image):
+        return []
+
+
+def test_source_face_upload_prepares_opencv_fallback_observation(sample_rgb):
+    detector = object.__new__(OpenCVFaceDetector)
+    detector._cascade = FallbackCascade()
+    detector._scale_factor = 1.12
+    detector._min_neighbors = 5
+    model = CountingTransformer()
+    store = SourceFaceStore(
+        FaceAnalyzer(detector, UnavailableLandmarks()),
+        FaceAligner(),
+        ManagerStub(model),
+    )
+
+    status = store.upload(sample_rgb)
+
+    assert status["selected_face_index"] == 0
+    assert status["faces"] == [{"x": 20, "y": 20, "width": 100, "height": 120, "confidence": None}]
+    assert status["model_ready"] is True
+    assert model.prepared == 1
 
 
 def test_source_face_multiple_selection_and_cached_representation(sample_rgb):

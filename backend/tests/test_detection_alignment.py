@@ -4,6 +4,7 @@ import numpy as np
 
 from app.alignment.face_aligner import FaceAligner
 from app.detection.analyzer import FaceAnalyzer
+from app.detection.face_detector import OpenCVFaceDetector
 from app.detection.types import BoundingBox, FaceObservation
 
 
@@ -23,6 +24,44 @@ class Landmarks:
 
     def analyze(self, image):
         return self.faces
+
+
+class Cascade:
+    def detectMultiScale(self, image, **kwargs):
+        return np.asarray([[12, 18, 36, 42]], dtype=np.int32)
+
+
+def test_face_observation_normalizes_tuple_bounding_box():
+    face = FaceObservation((1, 2, 30, 40))
+    assert face.bbox == BoundingBox(1, 2, 30, 40)
+
+
+def test_face_observation_normalizes_list_bounding_box():
+    face = FaceObservation([1, 2, 30, 40])
+    assert face.bbox == BoundingBox(1, 2, 30, 40)
+
+
+def test_face_observation_normalizes_numpy_bounding_box():
+    face = FaceObservation(np.asarray([1, 2, 30, 40], dtype=np.int32))
+    assert face.bbox == BoundingBox(1, 2, 30, 40)
+
+
+def test_face_observation_keeps_typed_bounding_box():
+    bbox = BoundingBox(1, 2, 30, 40)
+    assert FaceObservation(bbox).bbox is bbox
+
+
+def test_opencv_detector_wraps_detected_boxes_in_bounding_boxes():
+    detector = object.__new__(OpenCVFaceDetector)
+    detector._cascade = Cascade()
+    detector._scale_factor = 1.12
+    detector._min_neighbors = 5
+
+    faces = detector.detect(np.zeros((80, 80, 3), dtype=np.uint8))
+
+    assert len(faces) == 1
+    assert faces[0].bbox == BoundingBox(12, 18, 36, 42)
+    assert isinstance(faces[0].bbox, BoundingBox)
 
 
 def test_face_analyzer_uses_landmarks_and_falls_back():
