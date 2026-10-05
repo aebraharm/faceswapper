@@ -12,7 +12,9 @@ from app.alignment.face_aligner import FaceAligner
 from app.blending.compositor import FaceCompositor
 from app.camera.frame_diagnostics import (
     FrameDiagnostics,
+    log_camera_transport_diagnostics,
     log_frontend_frame_diagnostics,
+    log_live_frame_started,
     record_error,
     record_event,
     record_image,
@@ -59,6 +61,27 @@ class FrameProcessor:
         self._next_diagnostics_at = now + self._diagnostics_interval_seconds
         return FrameDiagnostics(trace_kind="live_camera_frame")
 
+    def begin_live_frame_diagnostics(self, transport: dict[str, Any] | None = None) -> FrameDiagnostics | None:
+        """Allocate and persist a trace ID before dispatching the frame worker.
+
+        The complete trace is written when processing returns. This small start
+        record is deliberately written first so a blocked ONNX call can never
+        make a received camera frame indistinguishable from no received frame.
+        """
+        diagnostics = self._sample_diagnostics()
+        if diagnostics is None:
+            return None
+        values = {"trace_id": diagnostics.trace_id, "trace_kind": diagnostics.trace_kind, **(transport or {})}
+        log_live_frame_started(values)
+        with diagnostics.activate():
+            record_event("live_frame.backend_received", values)
+        return diagnostics
+
+    def record_camera_transport_diagnostics(self, values: dict[str, Any]) -> None:
+        """Persist sampled browser capture/send facts without storing image bytes."""
+        if self._diagnostics_enabled:
+            log_camera_transport_diagnostics(values)
+
     def record_frontend_diagnostics(self, values: dict[str, Any]) -> None:
         """Persist a renderer acknowledgement only for an already sampled frame."""
         if self._diagnostics_enabled:
@@ -72,9 +95,15 @@ class FrameProcessor:
             if value is not None:
                 record_image(f"source_representation.{field}", value, layout="NCHW" if field == "feature_3d" else "HWC")
 
-    def process_jpeg(self, payload: bytes) -> tuple[bytes, dict[str, Any]]:
+    def process_jpeg(
+        self,
+        payload: bytes,
+        diagnostics: FrameDiagnostics | None = None,
+    ) -> tuple[bytes, dict[str, Any]]:
         started = time.perf_counter()
-        diagnostics = self._sample_diagnostics()
+        # Direct callers retain the existing diagnostic behavior. The WebSocket
+        # path supplies a trace allocated before this worker begins.
+        diagnostics = diagnostics if diagnostics is not None else self._sample_diagnostics()
         scope = diagnostics.activate() if diagnostics is not None else nullcontext()
         try:
             with scope:

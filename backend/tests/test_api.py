@@ -22,6 +22,7 @@ def test_health_and_browser_camera_devices_contract():
         health = client.get("/health")
         assert health.status_code == 200
         assert health.json()["status"] == "ok"
+        assert health.json()["frame_diagnostics_enabled"] is False
         devices = client.get("/camera/devices").json()
         assert devices["source"] == "browser"
         assert devices["requires_browser_permission"] is True
@@ -178,6 +179,50 @@ def test_camera_websocket_returns_binary_preview_and_performance_stats():
             assert np.any(decoded != 0)
             # Output remains BGR JPEG data that a browser image decoder can draw.
             assert decoded[60, 80].mean() > 20
+        client.post("/camera/stop")
+
+
+def test_camera_websocket_records_sampled_capture_transport_before_binary_frame(tmp_path):
+    import cv2
+    import numpy as np
+
+    settings = Settings(frame_diagnostics=True, models_dir=str(tmp_path / "models"))
+    with TestClient(create_app(settings)) as client:
+        transport = []
+        client.app.state.services.frame_processor.record_camera_transport_diagnostics = transport.append
+        client.post("/camera/start", json={})
+        ok, frame = cv2.imencode(".jpg", np.full((80, 96, 3), 140, dtype=np.uint8))
+        assert ok
+        with client.websocket_connect("/ws/stream") as websocket:
+            websocket.send_text(json.dumps({
+                "type": "camera_stream_started",
+                "transport_id": "stream-1",
+                "websocket_open": True,
+            }))
+            websocket.send_text(json.dumps({
+                "type": "camera_frame_capture",
+                "transport_id": "frame-1",
+                "capture_width": 96,
+                "capture_height": 80,
+            }))
+            websocket.send_text(json.dumps({
+                "type": "camera_frame_encoded",
+                "transport_id": "frame-1",
+                "jpeg_bytes": len(frame.tobytes()),
+            }))
+            websocket.send_bytes(frame.tobytes())
+            stats = websocket.receive_json()
+            websocket.receive_bytes()
+        assert stats["frame_diagnostics"]["trace_kind"] == "live_camera_frame"
+        assert [event["type"] for event in transport[:5]] == [
+            "backend_websocket_accepted",
+            "camera_stream_started",
+            "camera_frame_capture",
+            "camera_frame_encoded",
+            "backend_binary_received",
+        ]
+        assert transport[4]["transport_id"] == "frame-1"
+        assert transport[-1]["type"] == "backend_websocket_closed"
         client.post("/camera/stop")
 
 

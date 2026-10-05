@@ -4,7 +4,7 @@ import json
 
 import numpy as np
 
-from app.camera.frame_diagnostics import FrameDiagnostics, configure_diagnostics_log, record_event
+from app.camera.frame_diagnostics import FrameDiagnostics, configure_diagnostics_log, log_camera_transport_diagnostics, record_event
 from app.config import Settings
 from app.detection.face_detector import OpenCVFaceDetector
 
@@ -27,6 +27,21 @@ def test_frame_diagnostics_file_is_json_lines_and_rotates_in_the_configured_loca
         assert payload["trace_kind"] == "unspecified"
         assert isinstance(payload["trace_id"], str) and payload["trace_id"]
         assert payload["stages"] == [{"stage": "test.detector", "kind": "event", "detections": 1}]
+    finally:
+        configure_diagnostics_log(None)
+
+
+def test_transport_record_preserves_its_event_name_under_a_stable_jsonl_type(tmp_path):
+    path = tmp_path / "logs" / "trace.jsonl"
+    configure_diagnostics_log(path)
+    try:
+        log_camera_transport_diagnostics({"type": "camera_frame_capture", "transport_id": "frame-1"})
+        payload = json.loads(path.read_text(encoding="utf-8").strip())
+        assert payload == {
+            "event": "camera_frame_capture",
+            "transport_id": "frame-1",
+            "type": "camera_transport_diagnostics",
+        }
     finally:
         configure_diagnostics_log(None)
 

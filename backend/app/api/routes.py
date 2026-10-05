@@ -28,6 +28,9 @@ def health(request: Request) -> dict[str, object]:
         "service": "realtime-face-transform",
         "landmarks_available": state.analyzer.landmarks_available,
         "transformer_loaded": state.transformer.loaded,
+        # Lets the renderer emit sparse pre-binary transport checkpoints only
+        # during an explicitly enabled local diagnostic session.
+        "frame_diagnostics_enabled": state.settings.frame_diagnostics,
         "privacy": "source images and identity features are held in memory only",
     }
 

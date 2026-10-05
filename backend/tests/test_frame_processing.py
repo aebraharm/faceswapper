@@ -98,6 +98,28 @@ def test_opt_in_frame_diagnostics_trace_capture_and_jpeg_decode_boundaries(caplo
     assert logged[-1]["trace_id"] == trace["trace_id"]
 
 
+def test_live_trace_is_persisted_before_frame_processing_can_block(caplog):
+    camera = CameraSession()
+    camera.start()
+    processor = _no_face_processor(camera, diagnostics_enabled=True, diagnostics_interval_ms=60_000)
+    with caplog.at_level("WARNING"):
+        diagnostics = processor.begin_live_frame_diagnostics(
+            {"type": "backend_binary_received", "transport_id": "frame-1", "bytes": 1234}
+        )
+        assert diagnostics is not None
+        # The start record is intentionally durable before process_jpeg() runs;
+        # it remains available even if inference never returns.
+        processor.process_jpeg(make_jpeg(), diagnostics)
+
+    records = [json.loads(record.message) for record in caplog.records if record.name == "app.camera.frame_diagnostics"]
+    started = next(record for record in records if record["type"] == "live_camera_frame_started")
+    completed = next(record for record in records if record["type"] == "live_camera_frame_diagnostics")
+    assert started["trace_id"] == diagnostics.trace_id == completed["trace_id"]
+    assert started["event"] == "backend_binary_received"
+    stages = {entry["stage"]: entry for entry in completed["stages"]}
+    assert stages["live_frame.backend_received"]["transport_id"] == "frame-1"
+
+
 def test_real_liveportrait_512_pipeline_preserves_a_nonblack_decodable_camera_frame(tmp_path):
     """Regression: trace a real ONNX adapter output through every backend image boundary."""
     from app.detection.types import BoundingBox, FaceObservation

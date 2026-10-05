@@ -81,6 +81,11 @@ function App() {
   // This is set only by the backend's opt-in sampled diagnostic stats frame;
   // normal production preview rendering does not write per-frame console logs.
   const pendingFrameDiagnosticsRef = useRef<string | null>(null);
+  // The backend advertises this only for opt-in investigations. It lets the
+  // renderer emit sparse capture/send checkpoints before a binary frame could
+  // block in local inference; normal camera streaming sends none of them.
+  const backendDiagnosticsEnabledRef = useRef(false);
+  const transformEnabledRef = useRef(false);
 
   const [backendReady, setBackendReady] = useState(false);
   const [landmarksAvailable, setLandmarksAvailable] = useState(false);
@@ -131,6 +136,10 @@ function App() {
   }, []);
 
   useEffect(() => {
+    transformEnabledRef.current = transformEnabled;
+  }, [transformEnabled]);
+
+  useEffect(() => {
     let mounted = true;
     if (window.frameDesktop) {
       void window.frameDesktop.loadSettings()
@@ -173,6 +182,7 @@ function App() {
       .then(([health, sourceStatus, modelStatus]) => {
         if (!mounted) return;
         setBackendReady(true);
+        backendDiagnosticsEnabledRef.current = Boolean(health.frame_diagnostics_enabled);
         setLandmarksAvailable(health.landmarks_available);
         setSource(sourceStatus);
         setModel(modelStatus);
@@ -250,7 +260,16 @@ function App() {
         const stats = JSON.parse(event.data) as FrameStats;
         if (stats.type === 'error') {
           frameInFlightRef.current = false;
-          setCameraError(stats.message ?? 'The camera frame could not be processed.');
+          const message = stats.message ?? 'The camera frame could not be processed.';
+          if (backendDiagnosticsEnabledRef.current && socketRef.current?.readyState === WebSocket.OPEN) {
+            socketRef.current.send(JSON.stringify({
+              type: 'camera_backend_error',
+              transport_id: `backend-error-${Date.now()}`,
+              message,
+              transformation_enabled: transformEnabledRef.current,
+            }));
+          }
+          setCameraError(message);
           return;
         }
         setFps(stats.fps ?? 0);
@@ -403,8 +422,14 @@ function App() {
       connectingSocket = socket;
       socket.binaryType = 'blob';
       socket.onmessage = (event) => void handleFrameMessage(event);
-      socket.onerror = () => setCameraError('The local processing stream could not connect to the backend.');
-      socket.onclose = () => {
+      socket.onerror = () => {
+        if (backendDiagnosticsEnabledRef.current) console.debug('[FRAME] WebSocket error before/while camera streaming');
+        setCameraError('The local processing stream could not connect to the backend.');
+      };
+      socket.onclose = (event) => {
+        if (backendDiagnosticsEnabledRef.current) {
+          console.debug('[FRAME] WebSocket closed', { code: event.code, reason: event.reason, wasClean: event.wasClean });
+        }
         if (!intentionallyStoppingRef.current && streamRef.current) {
           setCameraError('The processing connection closed. Stop and restart the camera to reconnect.');
           setCameraLive(false);
@@ -440,9 +465,48 @@ function App() {
       const sourceCanvas = hiddenCaptureRef.current;
       const sourceContext = sourceCanvas?.getContext('2d', { alpha: false });
       let lastSent = 0;
+      let nextTransportDiagnosticAt = 0;
+      let transportSequence = 0;
+      let jpegEncodingInFlight = false;
+      const emitTransportDiagnostic = (type: string, transportId: string, details: Record<string, unknown> = {}) => {
+        if (!backendDiagnosticsEnabledRef.current || socket.readyState !== WebSocket.OPEN) return;
+        try {
+          socket.send(JSON.stringify({ type, transport_id: transportId, ...details }));
+        } catch (error) {
+          // A failed WebSocket cannot report its own diagnostic record. Keep an
+          // opt-in renderer-console fact instead of changing camera behavior.
+          console.debug('[FRAME] diagnostic WebSocket send failed', { type, error });
+        }
+      };
+      const streamTransportId = `stream-${Date.now()}-${transportSequence++}`;
+      emitTransportDiagnostic('camera_stream_started', streamTransportId, {
+        websocket_open: true,
+        transformation_enabled: transformEnabledRef.current,
+      });
       const send = (timestamp: number) => {
-        if (socket.readyState !== WebSocket.OPEN || !video || !sourceCanvas || !sourceContext) return;
-        if (timestamp - lastSent >= 33 && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0) {
+        if (socket.readyState !== WebSocket.OPEN) return;
+        if (!video || !sourceCanvas || !sourceContext) {
+          if (backendDiagnosticsEnabledRef.current && timestamp >= nextTransportDiagnosticAt) {
+            nextTransportDiagnosticAt = timestamp + 1_000;
+            emitTransportDiagnostic('camera_capture_unavailable', `unavailable-${Math.round(timestamp)}-${transportSequence++}`, {
+              video_available: Boolean(video),
+              capture_canvas_available: Boolean(sourceCanvas),
+              capture_context_available: Boolean(sourceContext),
+            });
+          }
+          return;
+        }
+        if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || video.videoWidth <= 0) {
+          if (backendDiagnosticsEnabledRef.current && timestamp >= nextTransportDiagnosticAt) {
+            nextTransportDiagnosticAt = timestamp + 1_000;
+            emitTransportDiagnostic('camera_frame_loop_waiting', `video-${Math.round(timestamp)}-${transportSequence++}`, {
+              blocked_by: 'video_not_ready',
+              video_ready_state: video.readyState,
+              video_width: video.videoWidth,
+              video_height: video.videoHeight,
+            });
+          }
+        } else if (timestamp - lastSent >= 33) {
           lastSent = timestamp;
           const sourceWidth = video.videoWidth;
           const sourceHeight = video.videoHeight;
@@ -453,13 +517,85 @@ function App() {
             sourceCanvas.width = frameWidth;
             sourceCanvas.height = frameHeight;
           }
+          if (
+            backendDiagnosticsEnabledRef.current
+            && (frameInFlightRef.current || socket.bufferedAmount >= 500_000)
+            && timestamp >= nextTransportDiagnosticAt
+          ) {
+            const transportId = `wait-${Math.round(timestamp)}-${transportSequence++}`;
+            nextTransportDiagnosticAt = timestamp + 1_000;
+            emitTransportDiagnostic('camera_frame_loop_waiting', transportId, {
+              blocked_by: jpegEncodingInFlight
+                ? 'jpeg_encoding'
+                : (frameInFlightRef.current ? 'awaiting_backend_preview' : 'websocket_backpressure'),
+              buffered_amount: socket.bufferedAmount,
+              transformation_enabled: transformEnabledRef.current,
+            });
+          }
           if (!frameInFlightRef.current && socket.bufferedAmount < 500_000) {
+            const transportId = backendDiagnosticsEnabledRef.current && timestamp >= nextTransportDiagnosticAt
+              ? `frame-${Math.round(timestamp)}-${transportSequence++}`
+              : null;
+            if (transportId) {
+              nextTransportDiagnosticAt = timestamp + 1_000;
+              emitTransportDiagnostic('camera_frame_capture', transportId, {
+                video_width: sourceWidth,
+                video_height: sourceHeight,
+                capture_width: frameWidth,
+                capture_height: frameHeight,
+                transformation_enabled: transformEnabledRef.current,
+              });
+            }
             frameInFlightRef.current = true;
-            sourceContext.drawImage(video, 0, 0, frameWidth, frameHeight);
-            sourceCanvas.toBlob((blob) => {
-              if (blob && socket.readyState === WebSocket.OPEN && socket.bufferedAmount < 500_000) socket.send(blob);
-              else frameInFlightRef.current = false;
-            }, 'image/jpeg', 0.78);
+            try {
+              sourceContext.drawImage(video, 0, 0, frameWidth, frameHeight);
+            } catch (error) {
+              if (transportId) {
+                emitTransportDiagnostic('camera_frame_capture_failed', transportId, {
+                  error: error instanceof Error ? error.message : String(error),
+                });
+              }
+              return;
+            }
+            jpegEncodingInFlight = true;
+            try {
+              sourceCanvas.toBlob((blob) => {
+                jpegEncodingInFlight = false;
+                if (blob && socket.readyState === WebSocket.OPEN && socket.bufferedAmount < 500_000) {
+                  if (transportId) {
+                    emitTransportDiagnostic('camera_frame_encoded', transportId, {
+                      jpeg_bytes: blob.size,
+                      capture_width: frameWidth,
+                      capture_height: frameHeight,
+                    });
+                  }
+                  try {
+                    socket.send(blob);
+                  } catch (error) {
+                    if (transportId) {
+                      emitTransportDiagnostic('camera_frame_send_failed', transportId, {
+                        error: error instanceof Error ? error.message : String(error),
+                      });
+                    }
+                  }
+                } else {
+                  if (transportId) {
+                    emitTransportDiagnostic(blob ? 'camera_frame_send_skipped' : 'camera_frame_encode_failed', transportId, {
+                      reason: blob ? (socket.readyState !== WebSocket.OPEN ? 'websocket_not_open' : 'websocket_backpressure') : 'canvas_to_blob_returned_null',
+                    });
+                  }
+                  frameInFlightRef.current = false;
+                }
+              }, 'image/jpeg', 0.78);
+            } catch (error) {
+              jpegEncodingInFlight = false;
+              if (transportId) {
+                emitTransportDiagnostic('camera_frame_encode_failed', transportId, {
+                  error: error instanceof Error ? error.message : String(error),
+                });
+              }
+              return;
+            }
           }
         }
         sendAnimationRef.current = requestAnimationFrame(send);

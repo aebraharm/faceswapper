@@ -30,7 +30,7 @@ const json = (body: unknown): RequestInit => ({
 });
 
 export const api = {
-  health: () => request<{ status: string; landmarks_available: boolean }>('/health'),
+  health: () => request<{ status: string; landmarks_available: boolean; frame_diagnostics_enabled?: boolean }>('/health'),
   sourceStatus: () => request<SourceFaceStatus>('/source-face/status'),
   uploadSource: async (file: File): Promise<SourceFaceStatus> => {
     const contentType = getSourceImageContentType(file);

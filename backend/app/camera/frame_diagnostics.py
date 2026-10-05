@@ -112,16 +112,37 @@ def record_event(stage: str, values: dict[str, Any]) -> None:
         trace.record_event(stage, values)
 
 
-def log_frontend_frame_diagnostics(values: dict[str, Any]) -> None:
-    """Persist a sampled renderer decode/draw acknowledgement from the local UI."""
+def _log_diagnostic_record(record_type: str, values: dict[str, Any]) -> None:
+    """Write a small opt-in transport/lifecycle record without image payloads."""
+    normalized = FrameDiagnostics._json_value(values)
+    # ``type`` is the stable JSONL record discriminator. Preserve the wire/event
+    # name separately so transport facts are not flattened into one record type.
+    event = normalized.pop("type", None)
+    if event is not None:
+        normalized["event"] = event
     logger.warning(
         "%s",
         json.dumps(
-            {"type": "frontend_frame_diagnostics", **FrameDiagnostics._json_value(values)},
+            {**normalized, "type": record_type},
             separators=(",", ":"),
             sort_keys=True,
         ),
     )
+
+
+def log_frontend_frame_diagnostics(values: dict[str, Any]) -> None:
+    """Persist a sampled renderer decode/draw acknowledgement from the local UI."""
+    _log_diagnostic_record("frontend_frame_diagnostics", values)
+
+
+def log_camera_transport_diagnostics(values: dict[str, Any]) -> None:
+    """Persist client capture/send or backend receipt facts before frame work begins."""
+    _log_diagnostic_record("camera_transport_diagnostics", values)
+
+
+def log_live_frame_started(values: dict[str, Any]) -> None:
+    """Persist a live-frame trace ID before running a potentially blocking inference."""
+    _log_diagnostic_record("live_camera_frame_started", values)
 
 
 class FrameDiagnostics:
