@@ -139,6 +139,8 @@ h1 span { color: #8aa64d; }
 .camera-video, .processed-canvas { display: block; width: 100%; height: 100%; object-fit: cover; }
 .camera-video { display: none; }
 .video-stage.is-live .camera-video { display: block; }
+/* Used solely as an in-memory JPEG source; never part of the visual preview. */
+.hidden-capture-canvas { display: none; }
 .processed-canvas { display: none; }
 .video-stage.is-live .processed-canvas { display: block; }
 .mirrored { transform: scaleX(-1); }

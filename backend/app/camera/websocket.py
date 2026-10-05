@@ -61,6 +61,8 @@ async def camera_stream(websocket: WebSocket) -> None:
                             continue
                         if message_type in {
                             "camera_stream_started",
+                            "camera_capture_state",
+                            "camera_capture_ready",
                             "camera_capture_unavailable",
                             "camera_frame_capture",
                             "camera_frame_capture_failed",

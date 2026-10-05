@@ -200,6 +200,25 @@ def test_camera_websocket_records_sampled_capture_transport_before_binary_frame(
                 "websocket_open": True,
             }))
             websocket.send_text(json.dumps({
+                "type": "camera_capture_state",
+                "transport_id": "capture-state-1",
+                "video_ready_state": 4,
+                "video_width": 1280,
+                "video_height": 720,
+                "video_paused": False,
+                "stream_present": True,
+                "video_track_ready_state": "live",
+                "video_track_enabled": True,
+                "video_track_muted": False,
+                "transformation_enabled": False,
+            }))
+            websocket.send_text(json.dumps({
+                "type": "camera_capture_ready",
+                "transport_id": "capture-state-1",
+                "video_width": 1280,
+                "video_height": 720,
+            }))
+            websocket.send_text(json.dumps({
                 "type": "camera_frame_capture",
                 "transport_id": "frame-1",
                 "capture_width": 96,
@@ -214,14 +233,17 @@ def test_camera_websocket_records_sampled_capture_transport_before_binary_frame(
             stats = websocket.receive_json()
             websocket.receive_bytes()
         assert stats["frame_diagnostics"]["trace_kind"] == "live_camera_frame"
-        assert [event["type"] for event in transport[:5]] == [
+        assert [event["type"] for event in transport[:7]] == [
             "backend_websocket_accepted",
             "camera_stream_started",
+            "camera_capture_state",
+            "camera_capture_ready",
             "camera_frame_capture",
             "camera_frame_encoded",
             "backend_binary_received",
         ]
-        assert transport[4]["transport_id"] == "frame-1"
+        assert transport[2]["video_track_ready_state"] == "live"
+        assert transport[6]["transport_id"] == "frame-1"
         assert transport[-1]["type"] == "backend_websocket_closed"
         client.post("/camera/stop")
 

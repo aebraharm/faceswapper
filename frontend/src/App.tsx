@@ -65,6 +65,39 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Something went wrong. Please try again.';
 }
 
+function hasUsableVideoFrame(video: HTMLVideoElement): boolean {
+  return (
+    video.srcObject !== null
+    && !video.paused
+    && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
+    && video.videoWidth > 0
+    && video.videoHeight > 0
+  );
+}
+
+async function waitForUsableVideoFrame(video: HTMLVideoElement, timeoutMs = 8_000): Promise<void> {
+  if (hasUsableVideoFrame(video)) return;
+  await new Promise<void>((resolve, reject) => {
+    const events = ['loadedmetadata', 'loadeddata', 'canplay', 'playing'];
+    const cleanUp = () => {
+      window.clearTimeout(timeout);
+      events.forEach((event) => video.removeEventListener(event, onVideoStateChange));
+    };
+    const onVideoStateChange = () => {
+      if (!hasUsableVideoFrame(video)) return;
+      cleanUp();
+      resolve();
+    };
+    const timeout = window.setTimeout(() => {
+      cleanUp();
+      reject(new Error('The camera stream started but did not provide a usable video frame within 8 seconds.'));
+    }, timeoutMs);
+    events.forEach((event) => video.addEventListener(event, onVideoStateChange));
+    // Covers state changes that happened between the first check and listener setup.
+    onVideoStateChange();
+  });
+}
+
 function App() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const processedCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -398,11 +431,20 @@ function App() {
         ? { deviceId: { exact: selectedDevice }, width: { ideal: 1280 }, height: { ideal: 720 } }
         : { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' };
       localStream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints, audio: false });
-      streamRef.current = localStream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = localStream;
-        await videoRef.current.play();
+      const initialTrack = localStream.getVideoTracks()[0];
+      if (!initialTrack || initialTrack.readyState !== 'live') {
+        throw new Error('The camera permission request succeeded, but no live video track was returned.');
       }
+      streamRef.current = localStream;
+      const previewVideo = videoRef.current;
+      if (!previewVideo) {
+        throw new Error('The camera preview element is not mounted.');
+      }
+      previewVideo.srcObject = localStream;
+      await previewVideo.play();
+      // Electron can resolve play() before dimensions/current data are available.
+      // Do not begin the canvas loop until the attached stream has a drawable frame.
+      await waitForUsableVideoFrame(previewVideo);
       await refreshDevices();
       await api.cameraSettings({ transform_enabled: false, intensity, processing_resolution: resolution, performance_mode: performanceMode });
       await api.startCamera(selectedDevice || null);
@@ -464,6 +506,26 @@ function App() {
       const video = videoRef.current;
       const sourceCanvas = hiddenCaptureRef.current;
       const sourceContext = sourceCanvas?.getContext('2d', { alpha: false });
+      const captureState = (phase: string) => {
+        const track = localStream?.getVideoTracks()[0] ?? null;
+        return {
+          phase,
+          stream_present: Boolean(localStream),
+          video_element_present: Boolean(video),
+          video_src_object_present: Boolean(video?.srcObject),
+          video_ready_state: video?.readyState ?? null,
+          video_width: video?.videoWidth ?? null,
+          video_height: video?.videoHeight ?? null,
+          video_paused: video?.paused ?? null,
+          capture_canvas_present: Boolean(sourceCanvas),
+          capture_context_present: Boolean(sourceContext),
+          video_track_present: Boolean(track),
+          video_track_ready_state: track?.readyState ?? null,
+          video_track_enabled: track?.enabled ?? null,
+          video_track_muted: track?.muted ?? null,
+          transformation_enabled: transformEnabledRef.current,
+        };
+      };
       let lastSent = 0;
       let nextTransportDiagnosticAt = 0;
       let transportSequence = 0;
@@ -481,18 +543,30 @@ function App() {
       const streamTransportId = `stream-${Date.now()}-${transportSequence++}`;
       emitTransportDiagnostic('camera_stream_started', streamTransportId, {
         websocket_open: true,
-        transformation_enabled: transformEnabledRef.current,
+        ...captureState('stream_started'),
       });
+      const captureStateId = `capture-state-${Date.now()}-${transportSequence++}`;
+      emitTransportDiagnostic('camera_capture_state', captureStateId, captureState('capture_source_checked'));
+      const captureReady = Boolean(
+        video
+        && sourceCanvas
+        && sourceContext
+        && hasUsableVideoFrame(video)
+        && localStream?.getVideoTracks()[0]?.readyState === 'live'
+      );
+      if (captureReady) {
+        emitTransportDiagnostic('camera_capture_ready', captureStateId, captureState('capture_ready'));
+      }
       const send = (timestamp: number) => {
         if (socket.readyState !== WebSocket.OPEN) return;
         if (!video || !sourceCanvas || !sourceContext) {
           if (backendDiagnosticsEnabledRef.current && timestamp >= nextTransportDiagnosticAt) {
             nextTransportDiagnosticAt = timestamp + 1_000;
-            emitTransportDiagnostic('camera_capture_unavailable', `unavailable-${Math.round(timestamp)}-${transportSequence++}`, {
-              video_available: Boolean(video),
-              capture_canvas_available: Boolean(sourceCanvas),
-              capture_context_available: Boolean(sourceContext),
-            });
+            emitTransportDiagnostic(
+              'camera_capture_unavailable',
+              `unavailable-${Math.round(timestamp)}-${transportSequence++}`,
+              captureState('capture_unavailable'),
+            );
           }
           return;
         }
@@ -958,6 +1032,8 @@ function App() {
                 <div className="video-card-head"><span><span className="video-index">A</span> ORIGINAL</span><span className="video-live-indicator">{cameraLive ? 'LIVE' : 'STANDBY'}</span></div>
                 <div className={`video-stage${cameraLive ? ' is-live' : ''}`}>
                   <video ref={videoRef} className="camera-video mirrored" muted playsInline autoPlay />
+                  {/* Permanently mounted offscreen source for JPEG encoding; it never displays pixels. */}
+                  <canvas ref={hiddenCaptureRef} className="hidden-capture-canvas" aria-hidden="true" />
                   {!cameraLive && <div className="video-placeholder"><div className="placeholder-icon"><Video size={21} /></div><strong>Camera preview</strong><span>Start your camera to see the original feed</span></div>}
                   <span className="stage-corner stage-corner--tl" /><span className="stage-corner stage-corner--br" />
                 </div>

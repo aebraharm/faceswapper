@@ -104,6 +104,18 @@ describe('source photo selection and preview', () => {
     });
   }
 
+  it('keeps the video and JPEG capture canvas mounted before camera startup', async () => {
+    await renderApp();
+
+    // Regression for camera_capture_unavailable: the capture ref used to point
+    // to no DOM canvas, although getUserMedia and the WebSocket had succeeded.
+    const video = host.querySelector<HTMLVideoElement>('video.camera-video');
+    const captureCanvas = host.querySelector<HTMLCanvasElement>('canvas.hidden-capture-canvas');
+    expect(video).not.toBeNull();
+    expect(captureCanvas).not.toBeNull();
+    expect(captureCanvas?.getAttribute('aria-hidden')).toBe('true');
+  });
+
   it('previews the local selection immediately, then clearly confirms successful face detection', async () => {
     let resolveUpload!: (status: SourceFaceStatus) => void;
     const pendingUpload = new Promise<SourceFaceStatus>((resolve) => { resolveUpload = resolve; });
